@@ -4905,3 +4905,3074 @@ jobs:
               }
           }
           EOF
+          cat << 'EOF' > app/src/main/java/com/flagship/videoplayer/ui/player/PlayerScreenAndGestures.kt
+          package com.flagship.videoplayer.ui.player
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.pm.ActivityInfo
+          import android.net.Uri
+          import android.provider.OpenableColumns
+          import android.view.HapticFeedbackConstants
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.*
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material.icons.outlined.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.*
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.input.pointer.*
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalDensity
+          import androidx.compose.ui.platform.LocalView
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.core.view.WindowCompat
+          import androidx.core.view.WindowInsetsCompat
+          import androidx.core.view.WindowInsetsControllerCompat
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.ui.AspectRatioFrameLayout
+          import androidx.media3.ui.PlayerView
+          import com.flagship.videoplayer.data.*
+          import com.flagship.videoplayer.engine.*
+          import com.flagship.videoplayer.ui.theme.*
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlin.math.abs
+          import kotlin.math.PI
+          import kotlin.math.roundToInt
+          import kotlin.math.sin
+
+          // ============================================================================
+          // 1. GESTURE & SIDE-SHEET STATE ENUMS
+          // ============================================================================
+
+          enum class SideSheetTab(val title: String) {
+              SUBTITLES("Subtitles & Sync"),
+              AUDIO("Audio & Delay"),
+              BOOKMARKS_LOOPS("Bookmarks & Loops"),
+              SPEED("Playback Speed")
+          }
+
+          enum class ActiveGestureHud {
+              NONE,
+              BRIGHTNESS,
+              VOLUME,
+              HOLD_FAST_FORWARD,
+              FINE_SCRUBBING
+          }
+
+          // ============================================================================
+          // 2. THE 6-LAYER FLAGSHIP PLAYER SCREEN
+          // ============================================================================
+
+          @Composable
+          fun FlagshipPlayerScreen(
+              viewModel: PlayerViewModel,
+              isInPipMode: Boolean,
+              onEnterPipMode: () -> Unit,
+              onExitPlayer: () -> Unit
+          ) {
+              val context = LocalContext.current
+              val activity = context as? Activity
+              val localView = LocalView.current
+
+              val exoPlayer by viewModel.exoPlayerFlow.collectAsState()
+              val activeVideo by viewModel.activeVideo.collectAsState()
+              val palette by viewModel.dynamicPalette.collectAsState()
+              val prefs by viewModel.preferencesState.collectAsState()
+
+              val isPlaying by viewModel.isPlaying.collectAsState()
+              val currentPositionMs by viewModel.currentPositionMs.collectAsState()
+              val durationMs by viewModel.durationMs.collectAsState()
+              val bufferedPercentage by viewModel.bufferedPercentage.collectAsState()
+              val decoderMode by viewModel.decoderMode.collectAsState()
+              val playbackSpeed by viewModel.playbackSpeed.collectAsState()
+              val isHoldFastForward by viewModel.isHoldFastForwardActive.collectAsState()
+              val activeHoldSpeed by viewModel.activeHoldSpeed.collectAsState()
+
+              val zoomScale by viewModel.zoomScale.collectAsState()
+              val panOffsetX by viewModel.panOffsetX.collectAsState()
+              val panOffsetY by viewModel.panOffsetY.collectAsState()
+              val aspectRatioMode by viewModel.aspectRatioMode.collectAsState()
+              val orientationMode by viewModel.orientationMode.collectAsState()
+
+              val isTouchLocked by viewModel.isTouchLocked.collectAsState()
+              val showNerdStats by viewModel.showNerdStats.collectAsState()
+              val nerdStats by viewModel.nerdStats.collectAsState()
+
+              val volumeFraction by viewModel.volumeFraction.collectAsState()
+              val brightnessFraction by viewModel.brightnessFraction.collectAsState()
+
+              val loopStartMs by viewModel.loopStartMs.collectAsState()
+              val loopEndMs by viewModel.loopEndMs.collectAsState()
+              val bookmarks by viewModel.bookmarks.collectAsState()
+              val savedLoops by viewModel.savedLoops.collectAsState()
+
+              val audioTracks by viewModel.audioTracks.collectAsState()
+              val audioDelayMs by viewModel.audioDelayMs.collectAsState()
+              val subtitleTracks by viewModel.subtitleTracks.collectAsState()
+              val externalSubtitleLabel by viewModel.externalSubtitleLabel.collectAsState()
+              val subtitleDelayMs by viewModel.subtitleDelayMs.collectAsState()
+              val subtitleSpeedFactor by viewModel.subtitleSpeedFactor.collectAsState()
+              val subtitleAnchorTimeMs by viewModel.subtitleAnchorTimeMs.collectAsState()
+              val subtitlesEnabled by viewModel.subtitlesEnabled.collectAsState()
+              val activeSubtitleLines by viewModel.activeSubtitleLines.collectAsState()
+
+              // OSD & Side-Sheet UI States
+              var isOsdVisible by remember { mutableStateOf(true) }
+              var activeSideSheetTab by remember { mutableStateOf<SideSheetTab?>(null) }
+              var activeGestureHud by remember { mutableStateOf(ActiveGestureHud.NONE) }
+              var fineScrubSensitivityLabel by remember { mutableStateOf("1.0x Normal Scrub") }
+              var fineScrubPreviewTimeMs by remember { mutableStateOf(0L) }
+
+              // Double-Tap Ripple State
+              var doubleTapSeekAccumulatedSec by remember { mutableIntStateOf(0) }
+              var doubleTapSide by remember { mutableIntStateOf(0) } // -1 = Left, +1 = Right
+              var lastDoubleTapTimestamp by remember { mutableLongStateOf(0L) }
+
+              // Locked Screen Gentle Wake Pill State
+              var showLockedWakeShield by remember { mutableStateOf(false) }
+
+              // Toast Banner State
+              var activeBannerText by remember { mutableStateOf<String?>(null) }
+              LaunchedEffect(Unit) {
+                  viewModel.toastBanner.collect { msg ->
+                      activeBannerText = msg
+                      delay(2400L)
+                      if (activeBannerText == msg) activeBannerText = null
+                  }
+              }
+
+              // Auto-hide OSD after 4 seconds of inactivity while playing
+              LaunchedEffect(isOsdVisible, isPlaying, activeSideSheetTab, activeGestureHud, loopStartMs, loopEndMs) {
+                  if (isOsdVisible && isPlaying && activeSideSheetTab == null && activeGestureHud == ActiveGestureHud.NONE) {
+                      delay(4200L)
+                      isOsdVisible = false
+                  }
+              }
+
+              // Auto-reset Double-Tap Ripple Counter
+              LaunchedEffect(lastDoubleTapTimestamp) {
+                  if (lastDoubleTapTimestamp > 0L) {
+                      delay(900L)
+                      doubleTapSeekAccumulatedSec = 0
+                      doubleTapSide = 0
+                  }
+              }
+
+              // Immersive Fullscreen & Keep Screen On Management
+              DisposableEffect(activity) {
+                  val window = activity?.window
+                  window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  val insetsController = if (window != null) {
+                      WindowCompat.getInsetsController(window, window.decorView)
+                  } else null
+
+                  insetsController?.systemBarsBehavior =
+                      WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                  insetsController?.hide(WindowInsetsCompat.Type.systemBars())
+
+                  onDispose {
+                      window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                      val lp = window?.attributes
+                      if (lp != null) {
+                          lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                          window.attributes = lp
+                      }
+                      insetsController?.show(WindowInsetsCompat.Type.systemBars())
+                      activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                  }
+              }
+
+              // Apply Hardware Window Brightness when brightnessFraction > 0
+              LaunchedEffect(brightnessFraction, activity) {
+                  val window = activity?.window ?: return@LaunchedEffect
+                  val lp = window.attributes
+                  lp.screenBrightness = brightnessFraction.coerceIn(0.01f, 1.0f)
+                  window.attributes = lp
+              }
+
+              // Apply Orientation Mode
+              LaunchedEffect(orientationMode, activeVideo, activity) {
+                  val act = activity ?: return@LaunchedEffect
+                  act.requestedOrientation = when (orientationMode) {
+                      PlayerOrientationMode.SENSOR_LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                      PlayerOrientationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                      PlayerOrientationMode.REVERSE_LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+                      PlayerOrientationMode.AUTO_SYSTEM -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                      PlayerOrientationMode.MATCH_VIDEO -> {
+                          val vid = activeVideo
+                          if (vid != null && vid.height > vid.width) {
+                              ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                          } else {
+                              ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                          }
+                      }
+                  }
+              }
+
+              // Document Pickers for External Subtitles & External Audio
+              val subtitleFilePicker = rememberLauncherForActivityResult(
+                  contract = ActivityResultContracts.OpenDocument()
+              ) { uri: Uri? ->
+                  if (uri != null) {
+                      val name = queryDisplayName(context, uri) ?: "External_Subtitles.srt"
+                      viewModel.loadExternalSubtitleFile(uri, name)
+                  }
+              }
+
+              val audioFilePicker = rememberLauncherForActivityResult(
+                  contract = ActivityResultContracts.OpenDocument()
+              ) { uri: Uri? ->
+                  if (uri != null) {
+                      viewModel.loadExternalAudioFile(uri)
+                  }
+              }
+
+              BackHandler {
+                  when {
+                      activeSideSheetTab != null -> activeSideSheetTab = null
+                      isTouchLocked -> {
+                          showLockedWakeShield = true
+                      }
+                      else -> onExitPlayer()
+                  }
+              }
+
+              // Smooth Viewport Scaling when Layer 6 Side-Sheet is Open (0.72f width aligned left)
+              val viewportWidthFraction by animateFloatAsState(
+                  targetValue = if (activeSideSheetTab != null && !isInPipMode) 0.70f else 1.0f,
+                  animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+                  label = "ViewportWidthFraction"
+              )
+
+              // Dynamic Subtitle Bottom Margin (animates from 24.dp to 138.dp when OSD appears)
+              val animatedSubtitleBottomMargin by animateDpAsState(
+                  targetValue = when {
+                      isInPipMode -> 8.dp
+                      isOsdVisible && activeSideSheetTab == null && !isTouchLocked -> 142.dp
+                      else -> prefs.subtitleBottomMarginDp.dp
+                  },
+                  animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium),
+                  label = "SubtitleBottomMargin"
+              )
+
+              // ========================================================================
+              // ROOT 6-LAYER PLAYER BOX
+              // ========================================================================
+              Box(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .background(Color.Black)
+              ) {
+                  // --------------------------------------------------------------------
+                  // LAYER 0 & LAYER 1: VIDEO SURFACE + CUSTOM TIME-WARP SUBTITLE CANVAS
+                  // (Scales smoothly into the left 70% of the screen when Side-Sheet opens)
+                  // --------------------------------------------------------------------
+                  Box(
+                      modifier = Modifier
+                          .fillMaxHeight()
+                          .fillMaxWidth(viewportWidthFraction)
+                          .align(Alignment.CenterStart)
+                          .clipToBounds()
+                  ) {
+                      // LAYER 0: VideoSurfaceLayer
+                      VideoSurfaceLayer(
+                          exoPlayer = exoPlayer,
+                          aspectRatioMode = aspectRatioMode,
+                          zoomScale = zoomScale,
+                          panOffsetX = panOffsetX,
+                          panOffsetY = panOffsetY
+                      )
+
+                      // Sub-Zero "Extra Dim" Software Veil (0% down to -50% for pitch-black rooms)
+                      if (brightnessFraction < 0f) {
+                          val veilAlpha = (-brightnessFraction).coerceIn(0f, 0.75f)
+                          Box(
+                              modifier = Modifier
+                                  .fillMaxSize()
+                                  .background(Color.Black.copy(alpha = veilAlpha))
+                          )
+                      }
+
+                      // LAYER 1: CustomSubtitleCanvasLayer
+                      if (subtitlesEnabled && activeSubtitleLines.isNotEmpty()) {
+                          CustomSubtitleCanvasLayer(
+                              lines = activeSubtitleLines,
+                              prefs = prefs,
+                              bottomMargin = animatedSubtitleBottomMargin,
+                              isInPipMode = isInPipMode,
+                              modifier = Modifier.align(Alignment.BottomCenter)
+                          )
+                      }
+                  }
+
+                  // If in Android Picture-in-Picture mode, hide all OSD/Gestures/SideSheets
+                  if (isInPipMode) {
+                      return@Box
+                  }
+
+                  // --------------------------------------------------------------------
+                  // LAYER 2: VIGNETTE SCRIM LAYER (Dual Top 110.dp & Bottom 180.dp)
+                  // --------------------------------------------------------------------
+                  AnimatedVisibility(
+                      visible = isOsdVisible && !isTouchLocked && activeGestureHud == ActiveGestureHud.NONE,
+                      enter = fadeIn(tween(220)),
+                      exit = fadeOut(tween(220))
+                  ) {
+                      VignetteScrimLayer()
+                  }
+
+                  // --------------------------------------------------------------------
+                  // LAYER 3: GESTURE INTERCEPTOR LAYER (32.dp Edge Exclusion Zone)
+                  // --------------------------------------------------------------------
+                  if (!isTouchLocked) {
+                      GestureInterceptorLayer(
+                          modifier = Modifier
+                              .fillMaxHeight()
+                              .fillMaxWidth(viewportWidthFraction)
+                              .align(Alignment.CenterStart),
+                          doubleTapSeekSeconds = prefs.doubleTapSeekSeconds,
+                          currentBrightness = brightnessFraction,
+                          currentVolume = volumeFraction,
+                          currentZoom = zoomScale,
+                          currentPanX = panOffsetX,
+                          currentPanY = panOffsetY,
+                          defaultHoldSpeed = prefs.holdFastForwardSpeed,
+                          onSingleTap = {
+                              if (activeSideSheetTab != null) {
+                                  activeSideSheetTab = null
+                              } else {
+                                  isOsdVisible = !isOsdVisible
+                              }
+                          },
+                          onCenterDoubleTap = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                              viewModel.togglePlayPause()
+                          },
+                          onSideDoubleTapSeek = { isForward, seekSec ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                              val signedSec = if (isForward) seekSec else -seekSec
+                              doubleTapSide = if (isForward) 1 else -1
+                              doubleTapSeekAccumulatedSec += signedSec
+                              lastDoubleTapTimestamp = System.currentTimeMillis()
+                              viewModel.seekRelativeMs(signedSec * 1000L)
+                          },
+                          onBrightnessGesture = { newBrightness ->
+                              activeGestureHud = ActiveGestureHud.BRIGHTNESS
+                              isOsdVisible = false
+                              viewModel.setContinuousBrightnessFraction(newBrightness)
+                          },
+                          onVolumeGesture = { newVolume, crossed100Percent ->
+                              activeGestureHud = ActiveGestureHud.VOLUME
+                              isOsdVisible = false
+                              if (crossed100Percent) {
+                                  localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                              }
+                              viewModel.setContinuousVolumeFraction(newVolume)
+                          },
+                          onHoldFastForwardStart = { initialSpeed ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                              activeGestureHud = ActiveGestureHud.HOLD_FAST_FORWARD
+                              isOsdVisible = false
+                              viewModel.startHoldFastForward(initialSpeed)
+                          },
+                          onHoldFastForwardSlide = { newMultiplier, steppedTick ->
+                              if (steppedTick) {
+                                  localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                              }
+                              viewModel.updateHoldFastForwardSpeed(newMultiplier)
+                          },
+                          onHoldFastForwardEnd = {
+                              viewModel.stopHoldFastForward()
+                              activeGestureHud = ActiveGestureHud.NONE
+                          },
+                          onPinchZoomAndPan = { newScale, newPanX, newPanY ->
+                              viewModel.updateZoomAndPan(newScale, newPanX, newPanY)
+                          },
+                          onGestureEnded = {
+                              activeGestureHud = ActiveGestureHud.NONE
+                          }
+                      )
+                  } else {
+                      // Touch Lock Shield Interceptor
+                      Box(
+                          modifier = Modifier
+                              .fillMaxSize()
+                              .clickable(
+                                  interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                  indication = null
+                              ) {
+                                  showLockedWakeShield = !showLockedWakeShield
+                              }
+                      )
+                  }
+
+                  // --------------------------------------------------------------------
+                  // LAYER 4: TRANSIENT GESTURE HUD LAYER (Glass Pills, Wave Chevrons, Ripple, Nerd Stats)
+                  // --------------------------------------------------------------------
+                  TransientGestureHudLayer(
+                      activeGestureHud = activeGestureHud,
+                      brightnessFraction = brightnessFraction,
+                      volumeFraction = volumeFraction,
+                      isHoldFastForward = isHoldFastForward,
+                      activeHoldSpeed = activeHoldSpeed,
+                      doubleTapSide = doubleTapSide,
+                      doubleTapAccumulatedSec = doubleTapSeekAccumulatedSec,
+                      zoomScale = zoomScale,
+                      fineScrubTimeMs = fineScrubPreviewTimeMs,
+                      fineScrubSensitivityLabel = fineScrubSensitivityLabel,
+                      showNerdStats = showNerdStats,
+                      nerdStats = nerdStats,
+                      toastBannerText = activeBannerText,
+                      palette = palette,
+                      onResetZoom = { viewModel.resetZoomAndPan() },
+                      onCloseNerdStats = { viewModel.toggleNerdStats() }
+                  )
+
+                  // --------------------------------------------------------------------
+                  // LAYER 5: MAIN OSD CHROME LAYER (Forced Dark Cinema Chrome + Timeline + Loop Micro-Tuner)
+                  // --------------------------------------------------------------------
+                  AnimatedVisibility(
+                      visible = isOsdVisible && !isTouchLocked && activeGestureHud == ActiveGestureHud.NONE,
+                      enter = fadeIn(tween(180)),
+                      exit = fadeOut(tween(180))
+                  ) {
+                      MainOsdChromeLayer(
+                          videoTitle = activeVideo?.titleWithoutExt ?: "Video Playback",
+                          resolutionBadge = activeVideo?.resolutionBadge ?: "HD",
+                          isNetworkStream = activeVideo?.isNetworkStream == true,
+                          isPlaying = isPlaying,
+                          currentPositionMs = currentPositionMs,
+                          durationMs = durationMs,
+                          bufferedPercentage = bufferedPercentage,
+                          decoderMode = decoderMode,
+                          playbackSpeed = playbackSpeed,
+                          aspectRatioMode = aspectRatioMode,
+                          orientationMode = orientationMode,
+                          loopStartMs = loopStartMs,
+                          loopEndMs = loopEndMs,
+                          bookmarks = bookmarks,
+                          palette = palette,
+                          onBack = onExitPlayer,
+                          onSwitchDecoder = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                              viewModel.switchDecoderModeLive()
+                          },
+                          onEnterPip = onEnterPipMode,
+                          onToggleNerdStats = { viewModel.toggleNerdStats() },
+                          onPlayPause = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                              viewModel.togglePlayPause()
+                          },
+                          onSeekRelative = { deltaMs ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                              viewModel.seekRelativeMs(deltaMs)
+                          },
+                          onStepSingleFrame = { forward ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                              viewModel.stepSingleFrame(forward)
+                          },
+                          onTimelineScrub = { targetMs, isFastDragging, sensitivityLabel ->
+                              if (isFastDragging) {
+                                  activeGestureHud = ActiveGestureHud.FINE_SCRUBBING
+                                  fineScrubPreviewTimeMs = targetMs
+                                  fineScrubSensitivityLabel = sensitivityLabel
+                              } else {
+                                  activeGestureHud = ActiveGestureHud.NONE
+                              }
+                              viewModel.seekToExact(targetMs, isFastDragging = isFastDragging)
+                          },
+                          onDragLoopBracket = { newStartA, newEndB ->
+                              viewModel.setLoopPointsDirect(newStartA, newEndB)
+                          },
+                          onTapLoopPill = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                              viewModel.onLoopPillTapped()
+                          },
+                          onAdjustLoopA = { deltaMs ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                              viewModel.adjustLoopPointA(deltaMs)
+                          },
+                          onAdjustLoopB = { deltaMs ->
+                              localView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                              viewModel.adjustLoopPointB(deltaMs)
+                          },
+                          onSaveLoop = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                              viewModel.saveCurrentAbLoop()
+                          },
+                          onClearLoop = {
+                              viewModel.clearAbLoop()
+                          },
+                          onAddBookmark = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                              viewModel.addBookmarkAtCurrentPosition()
+                          },
+                          onLockTouch = {
+                              localView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                              viewModel.setTouchLocked(true)
+                              showLockedWakeShield = true
+                          },
+                          onOpenSideSheet = { tab ->
+                              activeSideSheetTab = if (activeSideSheetTab == tab) null else tab
+                          },
+                          onCycleAspectRatio = { viewModel.cycleAspectRatioMode() },
+                          onCycleOrientation = { viewModel.cycleOrientationMode() }
+                      )
+                  }
+
+                  // Accidental Touch Lock "Gentle Wake" Shield
+                  AnimatedVisibility(
+                      visible = isTouchLocked && showLockedWakeShield,
+                      enter = fadeIn() + scaleIn(initialScale = 0.9f),
+                      exit = fadeOut() + scaleOut(targetScale = 0.9f),
+                      modifier = Modifier
+                          .align(Alignment.TopCenter)
+                          .padding(top = 32.dp)
+                  ) {
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.primaryAccent),
+                          shadowElevation = 12.dp,
+                          modifier = Modifier. combinedClickable(
+                              onClick = {
+                                  viewModel.setTouchLocked(false)
+                                  showLockedWakeShield = false
+                                  isOsdVisible = true
+                              },
+                              onLongClick = {
+                                  viewModel.setTouchLocked(false)
+                                  showLockedWakeShield = false
+                                  isOsdVisible = true
+                              }
+                          )
+                      ) {
+                          Row(
+                              modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Icon(Icons.Default.LockOpen, contentDescription = null, tint = palette.primaryAccent)
+                              Spacer(Modifier.width(8.dp))
+                              Text(
+                                  text = "Touch Locked • Tap Here to Unlock Controls",
+                                  color = Color.White,
+                                  style = MaterialTheme.typography.labelLarge
+                              )
+                          }
+                      }
+                  }
+
+                  // --------------------------------------------------------------------
+                  // LAYER 6: VIEWPORT-SHRINKING RIGHT SIDE-SHEET (340.dp Translucent Dock)
+                  // --------------------------------------------------------------------
+                  AnimatedVisibility(
+                      visible = activeSideSheetTab != null && !isTouchLocked,
+                      enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+                      exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+                      modifier = Modifier.align(Alignment.CenterEnd)
+                  ) {
+                      activeSideSheetTab?.let { currentTab ->
+                          ViewportShrinkingSideSheet(
+                              activeTab = currentTab,
+                              onSelectTab = { activeSideSheetTab = it },
+                              onClose = { activeSideSheetTab = null },
+                              palette = palette,
+                              prefs = prefs,
+                              subtitleTracks = subtitleTracks,
+                              subtitlesEnabled = subtitlesEnabled,
+                              externalSubtitleLabel = externalSubtitleLabel,
+                              subtitleDelayMs = subtitleDelayMs,
+                              subtitleSpeedFactor = subtitleSpeedFactor,
+                              subtitleAnchorTimeMs = subtitleAnchorTimeMs,
+                              audioTracks = audioTracks,
+                              audioDelayMs = audioDelayMs,
+                              volumeFraction = volumeFraction,
+                              bookmarks = bookmarks,
+                              savedLoops = savedLoops,
+                              playbackSpeed = playbackSpeed,
+                              onSelectSubtitleTrack = { viewModel.selectSubtitleTrack(it) },
+                              onPickExternalSubtitle = {
+                                  subtitleFilePicker.launch(arrayOf("*/*"))
+                              },
+                              onAdjustSubtitleDelay = { viewModel.adjustSubtitleDelayMs(it) },
+                              onResetSubtitleDelay = { viewModel.resetSubtitleDelay() },
+                              onSetSubtitleSpeed = { viewModel.setSubtitleSpeedFactor(it) },
+                              onAnchorSubtitleSpeedHere = { viewModel.anchorSubtitleSpeedAtCurrentTime() },
+                              onUpdateSubtitleStyle = { font, size, color, outline, bg, bold, margin ->
+                                  viewModel.updateSubtitleStyle(font, size, color, outline, bg, bold, margin)
+                              },
+                              onSelectAudioTrack = { viewModel.selectAudioTrack(it) },
+                              onPickExternalAudio = {
+                                  audioFilePicker.launch(arrayOf("audio/*", "*/*"))
+                              },
+                              onAdjustAudioDelay = { viewModel.adjustAudioDelayMs(it) },
+                              onResetAudioDelay = { viewModel.resetAudioDelay() },
+                              onSetVolumeBoost = { viewModel.setContinuousVolumeFraction(it) },
+                              onSeekToExact = { viewModel.seekToExact(it, isFastDragging = false) },
+                              onAddBookmarkNow = { viewModel.addBookmarkAtCurrentPosition(it) },
+                              onUpdateBookmarkLabel = { bm, lbl -> viewModel.updateBookmarkLabel(bm, lbl) },
+                              onDeleteBookmark = { viewModel.deleteBookmark(it) },
+                              onActivateSavedLoop = { viewModel.activateSavedLoop(it) },
+                              onDeleteSavedLoop = { viewModel.deleteSavedLoop(it) },
+                              onSetPlaybackSpeed = { viewModel.setNormalPlaybackSpeed(it) }
+                          )
+                      }
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 3. LAYER 0, LAYER 1 & LAYER 2 IMPLEMENTATIONS
+          // ============================================================================
+
+          @Composable
+          private fun VideoSurfaceLayer(
+              exoPlayer: ExoPlayer?,
+              aspectRatioMode: AspectRatioMode,
+              zoomScale: Float,
+              panOffsetX: Float,
+              panOffsetY: Float
+          ) {
+              val aspectModifier = when (aspectRatioMode) {
+                  AspectRatioMode.RATIO_16_9 -> Modifier.aspectRatio(16f / 9f)
+                  AspectRatioMode.RATIO_4_3 -> Modifier.aspectRatio(4f / 3f)
+                  else -> Modifier.fillMaxSize()
+              }
+
+              Box(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .background(Color.Black),
+                  contentAlignment = Alignment.Center
+              ) {
+                  if (exoPlayer != null) {
+                      AndroidView(
+                          factory = { ctx ->
+                              PlayerView(ctx).apply {
+                                  useController = false
+                                  subtitleView?.visibility = android.view.View.GONE
+                                  layoutParams = ViewGroup.LayoutParams(
+                                      ViewGroup.LayoutParams.MATCH_PARENT,
+                                      ViewGroup.LayoutParams.MATCH_PARENT
+                                  )
+                              }
+                          },
+                          update = { playerView ->
+                              if (playerView.player != exoPlayer) {
+                                  playerView.player = exoPlayer
+                              }
+                              playerView.resizeMode = when (aspectRatioMode) {
+                                  AspectRatioMode.FIT, AspectRatioMode.RATIO_16_9, AspectRatioMode.RATIO_4_3 ->
+                                      AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                  AspectRatioMode.FILL ->
+                                      AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                                  AspectRatioMode.STRETCH ->
+                                      AspectRatioFrameLayout.RESIZE_MODE_FILL
+                              }
+                          },
+                          modifier = aspectModifier.graphicsLayer {
+                              scaleX = zoomScale
+                              scaleY = zoomScale
+                              translationX = panOffsetX
+                              translationY = panOffsetY
+                          }
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun CustomSubtitleCanvasLayer(
+              lines: List<String>,
+              prefs: AppPreferencesState,
+              bottomMargin: Dp,
+              isInPipMode: Boolean,
+              modifier: Modifier = Modifier
+          ) {
+              val joinedText = remember(lines) { lines.joinToString("\n") }
+              val fontFamily = remember(prefs.subtitleFont) { resolveSubtitleFontFamily(prefs.subtitleFont) }
+              val effectiveFontSize = if (isInPipMode) 12.sp else prefs.subtitleFontSizeSp.sp
+              val fontWeight = if (prefs.subtitleBold) FontWeight.Bold else FontWeight.Medium
+              val textColor = Color(prefs.subtitleTextColorArgb)
+
+              Box(
+                  modifier = modifier
+                      .fillMaxWidth()
+                      .padding(horizontal = 28.dp)
+                      .padding(bottom = bottomMargin),
+                  contentAlignment = Alignment.BottomCenter
+              ) {
+                  Box(
+                      modifier = Modifier
+                          .clip(RoundedCornerShape(8.dp))
+                          .background(Color.Black.copy(alpha = prefs.subtitleBgOpacity.coerceIn(0f, 0.92f)))
+                          .padding(horizontal = 12.dp, vertical = 5.dp),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      // Outline Stroke Text Layer
+                      if (prefs.subtitleOutlineWidthDp > 0.1f) {
+                          val strokePx = with(LocalDensity.current) { prefs.subtitleOutlineWidthDp.dp.toPx() }
+                          Text(
+                              text = joinedText,
+                              fontFamily = fontFamily,
+                              fontSize = effectiveFontSize,
+                              fontWeight = fontWeight,
+                              textAlign = TextAlign.Center,
+                              style = TextStyle.Default.copy(
+                                  color = Color.Black,
+                                  drawStyle = Stroke(
+                                      width = strokePx * 2f,
+                                      join = StrokeJoin.Round
+                                  )
+                              )
+                          )
+                      }
+                      // Primary Foreground Text Layer
+                      Text(
+                          text = joinedText,
+                          color = textColor,
+                          fontFamily = fontFamily,
+                          fontSize = effectiveFontSize,
+                          fontWeight = fontWeight,
+                          textAlign = TextAlign.Center
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun VignetteScrimLayer() {
+              Box(modifier = Modifier.fillMaxSize()) {
+                  // Top 110.dp Scrim
+                  Box(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .height(110.dp)
+                          .align(Alignment.TopCenter)
+                          .background(
+                              Brush.verticalGradient(
+                                  listOf(Color.Black.copy(alpha = 0.78f), Color.Transparent)
+                              )
+                          )
+                  )
+                  // Bottom 180.dp Scrim
+                  Box(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .height(190.dp)
+                          .align(Alignment.BottomCenter)
+                          .background(
+                              Brush.verticalGradient(
+                                  listOf(Color.Transparent, Color.Black.copy(alpha = 0.84f))
+                              )
+                          )
+                  )
+              }
+          }
+
+          // ============================================================================
+          // 4. LAYER 3: FULL-SCREEN GESTURE INTERCEPTOR LAYER
+          // ============================================================================
+
+          @Composable
+          private fun GestureInterceptorLayer(
+              modifier: Modifier = Modifier,
+              doubleTapSeekSeconds: Int,
+              currentBrightness: Float,
+              currentVolume: Float,
+              currentZoom: Float,
+              currentPanX: Float,
+              currentPanY: Float,
+              defaultHoldSpeed: Float,
+              onSingleTap: () -> Unit,
+              onCenterDoubleTap: () -> Unit,
+              onSideDoubleTapSeek: (Boolean, Int) -> Unit,
+              onBrightnessGesture: (Float) -> Unit,
+              onVolumeGesture: (Float, Boolean) -> Unit,
+              onHoldFastForwardStart: (Float) -> Unit,
+              onHoldFastForwardSlide: (Float, Boolean) -> Unit,
+              onHoldFastForwardEnd: () -> Unit,
+              onPinchZoomAndPan: (Float, Float, Float) -> Unit,
+              onGestureEnded: () -> Unit
+          ) {
+              val density = LocalDensity.current
+              val edgeExclusionPx = with(density) { 32.dp.toPx() }
+
+              val latestBrightness by rememberUpdatedState(currentBrightness)
+              val latestVolume by rememberUpdatedState(currentVolume)
+              val latestZoom by rememberUpdatedState(currentZoom)
+              val latestPanX by rememberUpdatedState(currentPanX)
+              val latestPanY by rememberUpdatedState(currentPanY)
+              val latestHoldSpeed by rememberUpdatedState(defaultHoldSpeed)
+              val latestDoubleTapSec by rememberUpdatedState(doubleTapSeekSeconds)
+
+              Box(
+                  modifier = modifier
+                      .pointerInput(Unit) {
+                          detectTapGestures(
+                              onTap = { onSingleTap() },
+                              onDoubleTap = { offset ->
+                                  val width = size.width.toFloat().coerceAtLeast(1f)
+                                  when {
+                                      offset.x < width * 0.33f -> onSideDoubleTapSeek(false, latestDoubleTapSec)
+                                      offset.x > width * 0.67f -> onSideDoubleTapSeek(true, latestDoubleTapSec)
+                                      else -> onCenterDoubleTap()
+                                  }
+                              },
+                              onLongPress = { startOffset ->
+                                  if (startOffset.x < edgeExclusionPx || startOffset.x > size.width - edgeExclusionPx) {
+                                      return@detectTapGestures
+                                  }
+                                  onHoldFastForwardStart(latestHoldSpeed)
+                              }
+                          )
+                      }
+                      .pointerInput(Unit) {
+                          awaitEachGesture {
+                              val down = awaitFirstDown(requireUnconsumed = false)
+                              val width = size.width.toFloat().coerceAtLeast(1f)
+                              val height = size.height.toFloat().coerceAtLeast(1f)
+
+                              // Respect 32.dp Android system gesture exclusion zone on edges
+                              if (down.position.x < edgeExclusionPx ||
+                                  down.position.x > width - edgeExclusionPx ||
+                                  down.position.y < edgeExclusionPx ||
+                                  down.position.y > height - edgeExclusionPx
+                              ) {
+                                  return@awaitEachGesture
+                              }
+
+                              var activeMode = 0 // 0=undecided, 1=brightness(left), 2=volume(right), 3=pinch, 4=holdSlide
+                              var accumBri = latestBrightness
+                              var accumVol = latestVolume
+                              var lastSteppedHoldQuarter = (latestHoldSpeed * 4f).roundToInt()
+                              val startTime = System.currentTimeMillis()
+                              var totalDy = 0f
+                              var totalDx = 0f
+
+                              do {
+                                  val event = awaitPointerEvent()
+                                  val pressedCount = event.changes.count { it.pressed }
+
+                                  if (pressedCount >= 2) {
+                                      activeMode = 3
+                                      val zoomChange = event.calculateZoom()
+                                      val panChange = event.calculatePan()
+                                      val nextScale = (latestZoom * zoomChange).coerceIn(0.25f, 5.0f)
+                                      val nextPanX = if (nextScale > 1.01f) latestPanX + panChange.x else 0f
+                                      val nextPanY = if (nextScale > 1.01f) latestPanY + panChange.y else 0f
+                                      onPinchZoomAndPan(nextScale, nextPanX, nextPanY)
+                                      event.changes.forEach { it.consume() }
+                                  } else if (pressedCount == 1 && activeMode != 3) {
+                                      val change = event.changes.first()
+                                      val dx = change.positionChange().x
+                                      val dy = change.positionChange().y
+                                      totalDx += dx
+                                      totalDy += dy
+
+                                      val heldDuration = System.currentTimeMillis() - startTime
+                                      if (heldDuration > 450L && abs(totalDy) < 36f && activeMode == 0) {
+                                          activeMode = 4
+                                      }
+
+                                      if (activeMode == 4) {
+                                          // Horizontal slide while holding fast-forward adjusts speed between 1.25x and 4.0x
+                                          val deltaSpeed = (change.position.x - down.position.x) / (width * 0.28f)
+                                          val newSpeed = (latestHoldSpeed + deltaSpeed).coerceIn(1.25f, 4.0f)
+                                          val quarter = (newSpeed * 4f).roundToInt()
+                                          val ticked = quarter != lastSteppedHoldQuarter
+                                          lastSteppedHoldQuarter = quarter
+                                          onHoldFastForwardSlide(newSpeed, ticked)
+                                          change.consume()
+                                      } else if (activeMode == 0 && abs(totalDy) > 22f && abs(totalDy) > abs(totalDx) * 1.3f) {
+                                          if (down.position.x < width * 0.35f) {
+                                              activeMode = 1
+                                              accumBri = latestBrightness
+                                          } else if (down.position.x > width * 0.65f) {
+                                              activeMode = 2
+                                              accumVol = latestVolume
+                                          }
+                                      }
+
+                                      if (activeMode == 1) {
+                                          val deltaBri = -dy / (height * 0.68f)
+                                          accumBri = (accumBri + deltaBri).coerceIn(-0.5f, 1.0f)
+                                          onBrightnessGesture(accumBri)
+                                          change.consume()
+                                      } else if (activeMode == 2) {
+                                          val deltaVol = -dy / (height * 0.55f)
+                                          val prevAbove = accumVol >= 1.0f
+                                          accumVol = (accumVol + deltaVol).coerceIn(0.0f, 2.0f)
+                                          val nowAbove = accumVol >= 1.0f
+                                          onVolumeGesture(accumVol, !prevAbove && nowAbove)
+                                          change.consume()
+                                      }
+                                  }
+                              } while (event.changes.any { it.pressed })
+
+                              onHoldFastForwardEnd()
+                              onGestureEnded()
+                          }
+                      }
+              )
+          }
+
+          // ============================================================================
+          // 5. LAYER 4: TRANSIENT GESTURE HUD LAYER (GLASS PILLS & WAVE CHEVRONS)
+          // ============================================================================
+
+          @Composable
+          private fun TransientGestureHudLayer(
+              activeGestureHud: ActiveGestureHud,
+              brightnessFraction: Float,
+              volumeFraction: Float,
+              isHoldFastForward: Boolean,
+              activeHoldSpeed: Float,
+              doubleTapSide: Int,
+              doubleTapAccumulatedSec: Int,
+              zoomScale: Float,
+              fineScrubTimeMs: Long,
+              fineScrubSensitivityLabel: String,
+              showNerdStats: Boolean,
+              nerdStats: LiveNerdStats,
+              toastBannerText: String?,
+              palette: VideoDynamicPalette,
+              onResetZoom: () -> Unit,
+              onCloseNerdStats: () -> Unit
+          ) {
+              Box(modifier = Modifier.fillMaxSize()) {
+                  // 1. Vertical Frosted-Glass Pill for Brightness (Displayed on Right side when dragging Left)
+                  AnimatedVisibility(
+                      visible = activeGestureHud == ActiveGestureHud.BRIGHTNESS,
+                      enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.92f),
+                      exit = fadeOut(tween(180)),
+                      modifier = Modifier
+                          .align(Alignment.CenterEnd)
+                          .padding(end = 42.dp)
+                  ) {
+                      val pct = (brightnessFraction * 100f).roundToInt()
+                      val normalizedFill = ((brightnessFraction + 0.5f) / 1.5f).coerceIn(0f, 1f)
+                      val barColor = if (brightnessFraction < 0f) palette.tertiaryLoopAccent else palette.primaryAccent
+
+                      VerticalGlassGesturePill(
+                          icon = if (brightnessFraction < 0f) Icons.Default.NightlightRound else Icons.Default.WbSunny,
+                          percentageText = if (pct < 0) "$pct%" else "$pct%",
+                          subLabel = if (pct < 0) "EXTRA DIM" else "BRIGHTNESS",
+                          fillFraction = normalizedFill,
+                          fillColor = barColor,
+                          palette = palette
+                      )
+                  }
+
+                  // 2. Vertical Frosted-Glass Pill for Smooth Float Volume 0%–200% (Displayed on Left when dragging Right)
+                  AnimatedVisibility(
+                      visible = activeGestureHud == ActiveGestureHud.VOLUME,
+                      enter = fadeIn(tween(120)) + scaleIn(initialScale = 0.92f),
+                      exit = fadeOut(tween(180)),
+                      modifier = Modifier
+                          .align(Alignment.CenterStart)
+                          .padding(start = 42.dp)
+                  ) {
+                      val pct = (volumeFraction * 100f).roundToInt()
+                      val normalizedFill = (volumeFraction / 2.0f).coerceIn(0f, 1f)
+                      val isBoosted = volumeFraction > 1.01f
+                      val barColor = if (isBoosted) palette.tertiaryLoopAccent else palette.primaryAccent
+                      val icon = when {
+                          pct == 0 -> Icons.Default.VolumeOff
+                          pct < 50 -> Icons.Default.VolumeDown
+                          else -> Icons.Default.VolumeUp
+                      }
+
+                      VerticalGlassGesturePill(
+                          icon = icon,
+                          percentageText = "$pct%",
+                          subLabel = if (isBoosted) "BOOST" else "VOLUME",
+                          fillFraction = normalizedFill,
+                          fillColor = barColor,
+                          palette = palette
+                      )
+                  }
+
+                  // 3. Configurable Press-and-Hold Fast-Forward Pill with Sine-Wave Animated Chevrons (>>>)
+                  AnimatedVisibility(
+                      visible = isHoldFastForward || activeGestureHud == ActiveGestureHud.HOLD_FAST_FORWARD,
+                      enter = slideInVertically(
+                          initialOffsetY = { -it },
+                          animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)
+                      ) + fadeIn(),
+                      exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut(),
+                      modifier = Modifier
+                          .align(Alignment.TopCenter)
+                          .padding(top = 24.dp)
+                  ) {
+                      val infiniteTransition = rememberInfiniteTransition(label = "WaveChevrons")
+                      val wavePhase by infiniteTransition.animateFloat(
+                          initialValue = 0f,
+                          targetValue = (2f * PI).toFloat(),
+                          animationSpec = infiniteRepeatable(
+                              animation = tween(durationMillis = 750, easing = LinearEasing)
+                          ),
+                          label = "ChevronWavePhase"
+                      )
+
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.5.dp, palette.primaryAccent),
+                          shadowElevation = 12.dp,
+                          modifier = Modifier.height(40.dp)
+                      ) {
+                          Row(
+                              modifier = Modifier.padding(horizontal = 18.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              Icon(
+                                  Icons.Default.Bolt,
+                                  contentDescription = null,
+                                  tint = palette.primaryAccent,
+                                  modifier = Modifier.size(18.dp)
+                              )
+                              Text(
+                                  text = String.format("%.2fx Fast Forward", activeHoldSpeed),
+                                  style = TabularNumeralStyle,
+                                  fontWeight = FontWeight.Bold,
+                                  fontSize = 13.sp,
+                                  color = Color.White
+                              )
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  for (idx in 0..2) {
+                                      val alpha = (0.35f + 0.65f * ((sin(wavePhase - idx * 0.9f) + 1f) / 2f)).coerceIn(0.2f, 1f)
+                                      Text(
+                                          text = "\u00BB",
+                                          color = palette.primaryAccent.copy(alpha = alpha),
+                                          fontWeight = FontWeight.ExtraBold,
+                                          fontSize = 18.sp
+                                      )
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  // 4. 2D Fine Timeline Scrubbing Preview HUD
+                  AnimatedVisibility(
+                      visible = activeGestureHud == ActiveGestureHud.FINE_SCRUBBING,
+                      enter = fadeIn() + scaleIn(initialScale = 0.9f),
+                      exit = fadeOut(),
+                      modifier = Modifier
+                          .align(Alignment.TopCenter)
+                          .padding(top = 74.dp)
+                  ) {
+                      Surface(
+                          shape = RoundedCornerShape(16.dp),
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.primaryAccent)
+                      ) {
+                          Column(
+                              modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Text(
+                                  text = FormatUtils.formatPreciseCentiseconds(fineScrubTimeMs),
+                                  style = TabularMonoStyle,
+                                  fontSize = 18.sp,
+                                  fontWeight = FontWeight.Bold,
+                                  color = palette.primaryAccent
+                              )
+                              Text(
+                                  text = fineScrubSensitivityLabel,
+                                  style = MaterialTheme.typography.labelSmall,
+                                  color = Color.White.copy(alpha = 0.8f)
+                              )
+                          }
+                      }
+                  }
+
+                  // 5. Double-Tap Ripple Seek Overlay (Left / Right Arc)
+                  AnimatedVisibility(
+                      visible = doubleTapSide != 0 && doubleTapAccumulatedSec != 0,
+                      enter = fadeIn(tween(100)) + scaleIn(initialScale = 0.85f),
+                      exit = fadeOut(tween(220)),
+                      modifier = Modifier.align(
+                          if (doubleTapSide < 0) Alignment.CenterStart else Alignment.CenterEnd
+                      ).padding(horizontal = 48.dp)
+                  ) {
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.primaryAccent),
+                          modifier = Modifier.size(92.dp)
+                      ) {
+                          Column(
+                              modifier = Modifier.fillMaxSize(),
+                              horizontalAlignment = Alignment.CenterHorizontally,
+                              verticalArrangement = Arrangement.Center
+                          ) {
+                              Icon(
+                                  imageVector = if (doubleTapSide < 0) Icons.Default.FastRewind else Icons.Default.FastForward,
+                                  contentDescription = null,
+                                  tint = palette.primaryAccent,
+                                  modifier = Modifier.size(28.dp)
+                              )
+                              val sign = if (doubleTapAccumulatedSec > 0) "+" else ""
+                              Text(
+                                  text = "${sign}${doubleTapAccumulatedSec}s",
+                                  style = TabularNumeralStyle,
+                                  fontWeight = FontWeight.Bold,
+                                  fontSize = 15.sp,
+                                  color = Color.White
+                              )
+                          }
+                      }
+                  }
+
+                  // 6. Pinch-to-Zoom Reset Pill
+                  AnimatedVisibility(
+                      visible = abs(zoomScale - 1.0f) > 0.03f && !isHoldFastForward,
+                      enter = fadeIn(),
+                      exit = fadeOut(),
+                      modifier = Modifier
+                          .align(Alignment.TopCenter)
+                          .padding(top = 24.dp)
+                  ) {
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = onResetZoom
+                      ) {
+                          Row(
+                              modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Icon(Icons.Default.ZoomIn, contentDescription = null, tint = palette.primaryAccent, modifier = Modifier.size(16.dp))
+                              Spacer(Modifier.width(6.dp))
+                              Text(
+                                  text = "${(zoomScale * 100).roundToInt()}% Zoom • Tap to Reset",
+                                  style = TabularNumeralStyle,
+                                  fontSize = 12.sp,
+                                  color = Color.White
+                              )
+                          }
+                      }
+                  }
+
+                  // 7. Live Nerd Stats / Codec Inspector Overlay
+                  AnimatedVisibility(
+                      visible = showNerdStats,
+                      enter = fadeIn() + slideInHorizontally(),
+                      exit = fadeOut() + slideOutHorizontally(),
+                      modifier = Modifier
+                          .align(Alignment.TopStart)
+                          .padding(start = 20.dp, top = 76.dp)
+                  ) {
+                      Surface(
+                          shape = RoundedCornerShape(14.dp),
+                          color = Color(0xFF0A0B0E).copy(alpha = 0.88f),
+                          border = BorderStroke(1.dp, palette.primaryAccent.copy(alpha = 0.5f))
+                      ) {
+                          Column(
+                              modifier = Modifier.padding(12.dp),
+                              verticalArrangement = Arrangement.spacedBy(4.dp)
+                          ) {
+                              Row(
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+                              ) {
+                                  Text(
+                                      "LIVE CODEC & RENDERER STATS",
+                                      style = TabularMonoStyle,
+                                      fontSize = 11.sp,
+                                      fontWeight = FontWeight.Bold,
+                                      color = palette.primaryAccent
+                                  )
+                                  IconButton(
+                                      onClick = onCloseNerdStats,
+                                      modifier = Modifier.size(18.dp)
+                                  ) {
+                                      Icon(Icons.Default.Close, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                  }
+                              }
+                              Text("Video: ${nerdStats.videoCodec} • ${nerdStats.resolutionAndFps}", style = TabularMonoStyle, fontSize = 11.sp, color = Color.White)
+                              Text("Decoder: ${nerdStats.activeDecoderBadge}", style = TabularMonoStyle, fontSize = 11.sp, color = Color.White)
+                              Text("Audio: ${nerdStats.audioCodecAndChannels} @ ${nerdStats.audioSampleRateHz} Hz", style = TabularMonoStyle, fontSize = 11.sp, color = Color.White)
+                              Text("Dropped Frames: ${nerdStats.droppedFrames} • Source: ${nerdStats.networkProtocol}", style = TabularMonoStyle, fontSize = 11.sp, color = Color.White)
+                          }
+                      }
+                  }
+
+                  // 8. Transient Toast Notification Banner
+                  AnimatedVisibility(
+                      visible = toastBannerText != null,
+                      enter = fadeIn() + slideInVertically { -it / 2 },
+                      exit = fadeOut(),
+                      modifier = Modifier
+                          .align(Alignment.TopCenter)
+                          .padding(top = 74.dp)
+                  ) {
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.primaryAccent.copy(alpha = 0.6f)),
+                          shadowElevation = 8.dp
+                      ) {
+                          Text(
+                              text = toastBannerText ?: "",
+                              style = TabularNumeralStyle,
+                              fontSize = 12.sp,
+                              color = Color.White,
+                              modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun VerticalGlassGesturePill(
+              icon: androidx.compose.ui.graphics.vector.ImageVector,
+              percentageText: String,
+              subLabel: String,
+              fillFraction: Float,
+              fillColor: Color,
+              palette: VideoDynamicPalette
+          ) {
+              val animatedFill by animateFloatAsState(
+                  targetValue = fillFraction.coerceIn(0f, 1f),
+                  animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                  label = "VerticalHudFill"
+              )
+
+              Surface(
+                  shape = RoundedCornerShape(24.dp),
+                  color = palette.osdElevatedSurface,
+                  border = BorderStroke(1.dp, palette.specularBorder),
+                  shadowElevation = 12.dp,
+                  modifier = Modifier.size(width = 54.dp, height = 204.dp)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .padding(vertical = 12.dp, horizontal = 8.dp),
+                      horizontalAlignment = Alignment.CenterHorizontally,
+                      verticalArrangement = Arrangement.SpaceBetween
+                  ) {
+                      Text(
+                          text = percentageText,
+                          style = TabularNumeralStyle,
+                          fontWeight = FontWeight.Bold,
+                          fontSize = 11.sp,
+                          color = Color.White
+                      )
+
+                      Box(
+                          modifier = Modifier
+                              .width(10.dp)
+                              .weight(1f)
+                              .padding(vertical = 8.dp)
+                              .clip(CircleShape)
+                              .background(Color.White.copy(alpha = 0.16f)),
+                          contentAlignment = Alignment.BottomCenter
+                      ) {
+                          Box(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .fillMaxHeight(animatedFill)
+                                  .clip(CircleShape)
+                                  .background(fillColor)
+                          )
+                      }
+
+                      Icon(
+                          imageVector = icon,
+                          contentDescription = subLabel,
+                          tint = fillColor,
+                          modifier = Modifier.size(20.dp)
+                      )
+                  }
+              }
+          }
+
+          private fun queryDisplayName(context: Context, uri: Uri): String? {
+              return runCatching {
+                  context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                      val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                      if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
+                  }
+              }.getOrNull()
+          }
+          EOF
+          cat << 'EOF' > app/src/main/java/com/flagship/videoplayer/ui/player/PlayerOsdAndSideSheet.kt
+          package com.flagship.videoplayer.ui.player
+
+          import androidx.compose.animation.*
+          import androidx.compose.animation.core.Spring
+          import androidx.compose.animation.core.animateDpAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.gestures.awaitEachGesture
+          import androidx.compose.foundation.gestures.awaitFirstDown
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material.icons.outlined.*
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.RectangleShape
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.input.pointer.pointerInput
+          import androidx.compose.ui.input.pointer.positionChange
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.flagship.videoplayer.data.*
+          import com.flagship.videoplayer.engine.PlayerTrackOption
+          import com.flagship.videoplayer.ui.theme.*
+          import java.util.Locale
+          import kotlin.math.abs
+          import kotlin.math.roundToInt
+          import kotlin.math.roundToLong
+
+          fun Modifier.clipToBounds(): Modifier = this.clip(RectangleShape)
+
+          // ============================================================================
+          // 1. LAYER 5: MAIN OSD CHROME LAYER (FORCED DARK CINEMA CHROME + TIMELINE)
+          // ============================================================================
+
+          @Composable
+          fun MainOsdChromeLayer(
+              videoTitle: String,
+              resolutionBadge: String,
+              isNetworkStream: Boolean,
+              isPlaying: Boolean,
+              currentPositionMs: Long,
+              durationMs: Long,
+              bufferedPercentage: Int,
+              decoderMode: DecoderMode,
+              playbackSpeed: Float,
+              aspectRatioMode: AspectRatioMode,
+              orientationMode: PlayerOrientationMode,
+              loopStartMs: Long?,
+              loopEndMs: Long?,
+              bookmarks: List<BookmarkEntity>,
+              palette: VideoDynamicPalette,
+              onBack: () -> Unit,
+              onSwitchDecoder: () -> Unit,
+              onEnterPip: () -> Unit,
+              onToggleNerdStats: () -> Unit,
+              onPlayPause: () -> Unit,
+              onSeekRelative: (Long) -> Unit,
+              onStepSingleFrame: (Boolean) -> Unit,
+              onTimelineScrub: (Long, Boolean, String) -> Unit,
+              onDragLoopBracket: (Long, Long) -> Unit,
+              onTapLoopPill: () -> Unit,
+              onAdjustLoopA: (Long) -> Unit,
+              onAdjustLoopB: (Long) -> Unit,
+              onSaveLoop: () -> Unit,
+              onClearLoop: () -> Unit,
+              onAddBookmark: () -> Unit,
+              onLockTouch: () -> Unit,
+              onOpenSideSheet: (SideSheetTab) -> Unit,
+              onCycleAspectRatio: () -> Unit,
+              onCycleOrientation: () -> Unit
+          ) {
+              Box(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(horizontal = 20.dp, vertical = 14.dp)
+              ) {
+                  // --------------------------------------------------------------------
+                  // TOP OSD BAR (Back, Title, [HW+] Live Switcher, PiP, Codec Nerd Stats)
+                  // --------------------------------------------------------------------
+                  Row(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .align(Alignment.TopCenter),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = onBack,
+                          modifier = Modifier.size(42.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                          }
+                      }
+
+                      Spacer(Modifier.width(12.dp))
+
+                      Column(modifier = Modifier.weight(1f)) {
+                          Text(
+                              text = videoTitle,
+                              style = MaterialTheme.typography.titleMedium,
+                              fontWeight = FontWeight.Bold,
+                              color = Color.White,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis
+                          )
+                          Row(
+                              horizontalArrangement = Arrangement.spacedBy(6.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Text(
+                                  text = if (isNetworkStream) "NETWORK STREAM • $resolutionBadge" else resolutionBadge,
+                                  style = TabularMonoStyle,
+                                  fontSize = 11.sp,
+                                  color = palette.primaryAccent
+                              )
+                              if (abs(playbackSpeed - 1.0f) > 0.01f) {
+                                  Text(
+                                      text = "• ${String.format(Locale.US, "%.2fx", playbackSpeed)}",
+                                      style = TabularMonoStyle,
+                                      fontSize = 11.sp,
+                                      color = palette.tertiaryLoopAccent
+                                  )
+                              }
+                          }
+                      }
+
+                      // Live Decoder Switcher Pill ([ HW ] / [ HW+ ] / [ SW ])
+                      Surface(
+                          shape = RoundedCornerShape(12.dp),
+                          color = palette.osdElevatedSurface,
+                          border = BorderStroke(1.dp, palette.primaryAccent.copy(alpha = 0.7f)),
+                          onClick = onSwitchDecoder
+                      ) {
+                          Row(
+                              modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Icon(
+                                  Icons.Default.Memory,
+                                  contentDescription = null,
+                                  tint = palette.primaryAccent,
+                                  modifier = Modifier.size(15.dp)
+                              )
+                              Spacer(Modifier.width(5.dp))
+                              Text(
+                                  text = decoderMode.badge,
+                                  style = TabularMonoStyle,
+                                  fontWeight = FontWeight.Bold,
+                                  fontSize = 12.sp,
+                                  color = Color.White
+                              )
+                          }
+                      }
+
+                      Spacer(Modifier.width(8.dp))
+
+                      // Picture-in-Picture (PiP) Button
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = onEnterPip,
+                          modifier = Modifier.size(40.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(
+                                  Icons.Default.PictureInPictureAlt,
+                                  contentDescription = "Picture in Picture",
+                                  tint = Color.White,
+                                  modifier = Modifier.size(19.dp)
+                              )
+                          }
+                      }
+
+                      Spacer(Modifier.width(8.dp))
+
+                      // Live Codec & Nerd Stats Button
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = onToggleNerdStats,
+                          modifier = Modifier.size(40.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(
+                                  Icons.Outlined.Analytics,
+                                  contentDescription = "Live Codec Stats",
+                                  tint = Color.White,
+                                  modifier = Modifier.size(19.dp)
+                              )
+                          }
+                      }
+                  }
+
+                  // --------------------------------------------------------------------
+                  // CENTER TRANSPORT CONTROLS (-10s, 1-Frame Step, Squircle Hero Play/Pause, +10s)
+                  // --------------------------------------------------------------------
+                  Row(
+                      modifier = Modifier.align(Alignment.Center),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(20.dp)
+                  ) {
+                      // Single-Frame Step Backward (Visible when paused or A-B Loop is active)
+                      if (!isPlaying || loopStartMs != null) {
+                          Surface(
+                              shape = CircleShape,
+                              color = palette.osdSurface,
+                              border = BorderStroke(1.dp, palette.specularBorder),
+                              onClick = { onStepSingleFrame(false) },
+                              modifier = Modifier.size(44.dp)
+                          ) {
+                              Box(contentAlignment = Alignment.Center) {
+                                  Icon(
+                                      Icons.Default.SkipPrevious,
+                                      contentDescription = "Step 1 Frame Back",
+                                      tint = palette.tertiaryLoopAccent,
+                                      modifier = Modifier.size(22.dp)
+                                  )
+                              }
+                          }
+                      }
+
+                      // -10s Rewind Button
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = { onSeekRelative(-10_000L) },
+                          modifier = Modifier.size(54.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(
+                                  Icons.Default.Replay10,
+                                  contentDescription = "Rewind 10s",
+                                  tint = Color.White,
+                                  modifier = Modifier.size(28.dp)
+                              )
+                          }
+                      }
+
+                      // Morphing Squircle-to-Circle Hero Play/Pause Button
+                      val heroCorner by animateDpAsState(
+                          targetValue = if (isPlaying) 22.dp else 36.dp,
+                          animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                          label = "HeroPlayPauseCorner"
+                      )
+                      Surface(
+                          shape = RoundedCornerShape(heroCorner),
+                          color = palette.primaryAccent,
+                          shadowElevation = 14.dp,
+                          onClick = onPlayPause,
+                          modifier = Modifier.size(72.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(
+                                  imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                  contentDescription = if (isPlaying) "Pause" else "Play",
+                                  tint = palette.onPrimaryAccent,
+                                  modifier = Modifier.size(38.dp)
+                              )
+                          }
+                      }
+
+                      // +10s Fast-Forward Button
+                      Surface(
+                          shape = CircleShape,
+                          color = palette.osdSurface,
+                          border = BorderStroke(1.dp, palette.specularBorder),
+                          onClick = { onSeekRelative(10_000L) },
+                          modifier = Modifier.size(54.dp)
+                      ) {
+                          Box(contentAlignment = Alignment.Center) {
+                              Icon(
+                                  Icons.Default.Forward10,
+                                  contentDescription = "Forward 10s",
+                                  tint = Color.White,
+                                  modifier = Modifier.size(28.dp)
+                              )
+                          }
+                      }
+
+                      // Single-Frame Step Forward (Visible when paused or A-B Loop is active)
+                      if (!isPlaying || loopStartMs != null) {
+                          Surface(
+                              shape = CircleShape,
+                              color = palette.osdSurface,
+                              border = BorderStroke(1.dp, palette.specularBorder),
+                              onClick = { onStepSingleFrame(true) },
+                              modifier = Modifier.size(44.dp)
+                          ) {
+                              Box(contentAlignment = Alignment.Center) {
+                                  Icon(
+                                      Icons.Default.SkipNext,
+                                      contentDescription = "Step 1 Frame Forward",
+                                      tint = palette.tertiaryLoopAccent,
+                                      modifier = Modifier.size(22.dp)
+                                  )
+                              }
+                          }
+                      }
+                  }
+
+                  // --------------------------------------------------------------------
+                  // BOTTOM OSD DECK (LOOP MICRO-TUNER BAR + TIMELINE CANVAS + LABELED PILLS)
+                  // --------------------------------------------------------------------
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .align(Alignment.BottomCenter),
+                      verticalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      // Floating Loop Micro-Tuner Bar (Visible whenever Loop A or A-B is active)
+                      AnimatedVisibility(
+                          visible = loopStartMs != null,
+                          enter = fadeIn() + slideInVertically { it / 2 },
+                          exit = fadeOut() + slideOutVertically { it / 2 }
+                      ) {
+                          LoopMicroTunerBar(
+                              loopStartMs = loopStartMs ?: 0L,
+                              loopEndMs = loopEndMs,
+                              palette = palette,
+                              onAdjustA = onAdjustLoopA,
+                              onAdjustB = onAdjustLoopB,
+                              onStepFrame = onStepSingleFrame,
+                              onSaveLoop = onSaveLoop,
+                              onClearLoop = onClearLoop
+                          )
+                      }
+
+                      // Timestamps Row (Tabular Numerals)
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(horizontal = 4.dp),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Text(
+                              text = FormatUtils.formatPreciseCentiseconds(currentPositionMs),
+                              style = TabularMonoStyle,
+                              fontSize = 13.sp,
+                              fontWeight = FontWeight.Bold,
+                              color = Color.White
+                          )
+
+                          if (bookmarks.isNotEmpty()) {
+                              Text(
+                                  text = "\u25C6 ${bookmarks.size} Bookmarks",
+                                  style = TabularNumeralStyle,
+                                  fontSize = 11.sp,
+                                  color = palette.tertiaryLoopAccent
+                              )
+                          }
+
+                          val remainingMs = (durationMs - currentPositionMs).coerceAtLeast(0L)
+                          Text(
+                              text = "-${FormatUtils.formatDurationMs(remainingMs)} / ${FormatUtils.formatDurationMs(durationMs)}",
+                              style = TabularMonoStyle,
+                              fontSize = 12.sp,
+                              color = Color.White.copy(alpha = 0.82f)
+                          )
+                      }
+
+                      // Custom Interactive Timeline Canvas with Draggable A-B Brackets & Bookmark Pins
+                      FlagshipTimelineCanvas(
+                          currentPositionMs = currentPositionMs,
+                          durationMs = durationMs,
+                          bufferedPercentage = bufferedPercentage,
+                          loopStartMs = loopStartMs,
+                          loopEndMs = loopEndMs,
+                          bookmarks = bookmarks,
+                          palette = palette,
+                          onScrub = onTimelineScrub,
+                          onDragLoopBracket = onDragLoopBracket
+                      )
+
+                      // Bottom Labeled Pill Bar
+                      LazyRow(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Outlined.Lock,
+                                  label = "Lock",
+                                  palette = palette,
+                                  onClick = onLockTouch
+                              )
+                          }
+                          item {
+                              val loopLabel = when {
+                                  loopStartMs == null -> "Loop A-B"
+                                  loopEndMs == null -> "A: ${FormatUtils.formatDurationMs(loopStartMs)} \u2192 Set B"
+                                  else -> "A-B Active"
+                              }
+                              OsdActionPill(
+                                  icon = Icons.Default.Repeat,
+                                  label = loopLabel,
+                                  isHighlighted = loopStartMs != null,
+                                  highlightColor = palette.tertiaryLoopAccent,
+                                  palette = palette,
+                                  onClick = onTapLoopPill
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Default.BookmarkAdd,
+                                  label = "Bookmark +",
+                                  palette = palette,
+                                  onClick = onAddBookmark
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Outlined.Subtitles,
+                                  label = "Subtitles",
+                                  palette = palette,
+                                  onClick = { onOpenSideSheet(SideSheetTab.SUBTITLES) }
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Outlined.Audiotrack,
+                                  label = "Audio",
+                                  palette = palette,
+                                  onClick = { onOpenSideSheet(SideSheetTab.AUDIO) }
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Outlined.Bookmarks,
+                                  label = "Pins & Loops (${bookmarks.size})",
+                                  palette = palette,
+                                  onClick = { onOpenSideSheet(SideSheetTab.BOOKMARKS_LOOPS) }
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Default.Speed,
+                                  label = String.format(Locale.US, "%.2fx Speed", playbackSpeed),
+                                  isHighlighted = abs(playbackSpeed - 1.0f) > 0.01f,
+                                  palette = palette,
+                                  onClick = { onOpenSideSheet(SideSheetTab.SPEED) }
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Default.AspectRatio,
+                                  label = aspectRatioMode.label,
+                                  palette = palette,
+                                  onClick = onCycleAspectRatio
+                              )
+                          }
+                          item {
+                              OsdActionPill(
+                                  icon = Icons.Default.ScreenRotation,
+                                  label = orientationMode.label,
+                                  palette = palette,
+                                  onClick = onCycleOrientation
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 2. FLOATING A-B LOOP MICRO-TUNER BAR & CUSTOM TIMELINE CANVAS
+          // ============================================================================
+
+          @Composable
+          private fun LoopMicroTunerBar(
+              loopStartMs: Long,
+              loopEndMs: Long?,
+              palette: VideoDynamicPalette,
+              onAdjustA: (Long) -> Unit,
+              onAdjustB: (Long) -> Unit,
+              onStepFrame: (Boolean) -> Unit,
+              onSaveLoop: () -> Unit,
+              onClearLoop: () -> Unit
+          ) {
+              Surface(
+                  shape = RoundedCornerShape(14.dp),
+                  color = palette.osdElevatedSurface,
+                  border = BorderStroke(1.dp, palette.tertiaryLoopAccent.copy(alpha = 0.75f)),
+                  shadowElevation = 10.dp,
+                  modifier = Modifier.fillMaxWidth()
+              ) {
+                  Row(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .horizontalScroll(rememberScrollState())
+                          .padding(horizontal = 10.dp, vertical = 6.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      MicroTunerChip(text = "A -0.1s", onClick = { onAdjustA(-100L) })
+                      MicroTunerChip(text = "A +0.1s", onClick = { onAdjustA(100L) })
+                      MicroTunerChip(text = "\u23EE 1f", onClick = { onStepFrame(false) })
+                      MicroTunerChip(text = "1f \u23ED", onClick = { onStepFrame(true) })
+
+                      Surface(
+                          shape = RoundedCornerShape(8.dp),
+                          color = palette.tertiaryLoopAccent.copy(alpha = 0.22f)
+                      ) {
+                          val endText = if (loopEndMs != null) FormatUtils.formatPreciseCentiseconds(loopEndMs) else "Set B..."
+                          Text(
+                              text = "${FormatUtils.formatPreciseCentiseconds(loopStartMs)} \u2013 $endText",
+                              style = TabularMonoStyle,
+                              fontSize = 11.sp,
+                              fontWeight = FontWeight.Bold,
+                              color = palette.tertiaryLoopAccent,
+                              modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                          )
+                      }
+
+                      if (loopEndMs != null) {
+                          MicroTunerChip(text = "B -0.1s", onClick = { onAdjustB(-100L) })
+                          MicroTunerChip(text = "B +0.1s", onClick = { onAdjustB(100L) })
+                          MicroTunerChip(
+                              text = "\uD83D\uDCBE Save Loop",
+                              highlightColor = palette.primaryAccent,
+                              onClick = onSaveLoop
+                          )
+                      }
+
+                      MicroTunerChip(
+                          text = "\u2715 Clear",
+                          highlightColor = Color(0xFFFF6B6B),
+                          onClick = onClearLoop
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun MicroTunerChip(
+              text: String,
+              highlightColor: Color = Color.White,
+              onClick: () -> Unit
+          ) {
+              Surface(
+                  shape = RoundedCornerShape(8.dp),
+                  color = Color.White.copy(alpha = 0.10f),
+                  border = BorderStroke(1.dp, highlightColor.copy(alpha = 0.35f)),
+                  onClick = onClick
+              ) {
+                  Text(
+                      text = text,
+                      style = TabularMonoStyle,
+                      fontSize = 11.sp,
+                      fontWeight = FontWeight.SemiBold,
+                      color = highlightColor,
+                      modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                  )
+              }
+          }
+
+          @Composable
+          private fun FlagshipTimelineCanvas(
+              currentPositionMs: Long,
+              durationMs: Long,
+              bufferedPercentage: Int,
+              loopStartMs: Long?,
+              loopEndMs: Long?,
+              bookmarks: List<BookmarkEntity>,
+              palette: VideoDynamicPalette,
+              onScrub: (Long, Boolean, String) -> Unit,
+              onDragLoopBracket: (Long, Long) -> Unit
+          ) {
+              val safeDuration = durationMs.coerceAtLeast(1L)
+              val latestPos by rememberUpdatedState(currentPositionMs)
+              val latestDur by rememberUpdatedState(safeDuration)
+              val latestLoopA by rememberUpdatedState(loopStartMs)
+              val latestLoopB by rememberUpdatedState(loopEndMs)
+
+              Canvas(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .height(48.dp)
+                      .pointerInput(Unit) {
+                          awaitEachGesture {
+                              val down = awaitFirstDown(requireUnconsumed = false)
+                              val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                              val startA = latestLoopA
+                              val endB = latestLoopB
+
+                              // Check if user grabbed Loop Bracket A or B handle (within 28px)
+                              val aX = if (startA != null) (startA.toFloat() / latestDur.toFloat()) * widthPx else -100f
+                              val bX = if (endB != null) (endB.toFloat() / latestDur.toFloat()) * widthPx else -100f
+
+                              val draggingBracket = when {
+                                  startA != null && endB != null && abs(down.position.x - aX) < 32f -> 1 // Dragging A
+                                  startA != null && endB != null && abs(down.position.x - bX) < 32f -> 2 // Dragging B
+                                  else -> 0 // Scrubbing timeline
+                              }
+
+                              var scrubAnchorMs = ((down.position.x / widthPx).coerceIn(0f, 1f) * latestDur).roundToLong()
+                              if (draggingBracket == 0) {
+                                  onScrub(scrubAnchorMs, true, "1.0x Normal Scrub")
+                              }
+
+                              var currentTargetMs = scrubAnchorMs
+                              do {
+                                  val event = awaitPointerEvent()
+                                  val change = event.changes.firstOrNull() ?: break
+                                  if (change.pressed) {
+                                      val dx = change.positionChange().x
+                                      val verticalPullUpPx = (down.position.y - change.position.y).coerceAtLeast(0f)
+
+                                      // 2D Fine Scrubbing Sensitivity based on upward finger distance
+                                      val (sensitivity, label) = when {
+                                          verticalPullUpPx > 140f -> 0.25f to "0.25x Ultra-Fine Scrub"
+                                          verticalPullUpPx > 65f -> 0.50f to "0.50x Fine Scrub"
+                                          else -> 1.0f to "1.0x Normal Scrub"
+                                      }
+
+                                      if (draggingBracket == 1 && startA != null && endB != null) {
+                                          val frac = (change.position.x / widthPx).coerceIn(0f, 1f)
+                                          val newA = (frac * latestDur).roundToLong().coerceAtMost(endB - 250L)
+                                          onDragLoopBracket(newA, endB)
+                                      } else if (draggingBracket == 2 && startA != null && endB != null) {
+                                          val frac = (change.position.x / widthPx).coerceIn(0f, 1f)
+                                          val newB = (frac * latestDur).roundToLong().coerceAtLeast(startA + 250L)
+                                          onDragLoopBracket(startA, newB)
+                                      } else {
+                                          val deltaMs = ((dx / widthPx) * latestDur * sensitivity).roundToLong()
+                                          currentTargetMs = (currentTargetMs + deltaMs).coerceIn(0L, latestDur)
+                                          onScrub(currentTargetMs, true, label)
+                                      }
+                                      change.consume()
+                                  }
+                              } while (event.changes.any { it.pressed })
+
+                              if (draggingBracket == 0) {
+                                  // Enforce SeekParameters.EXACT on finger release
+                                  onScrub(currentTargetMs, false, "Exact Frame Locked")
+                              }
+                          }
+                      }
+              ) {
+                  val canvasW = size.width
+                  val centerY = size.height / 2f
+                  val trackHeight = 6.dp.toPx()
+
+                  // 1. Unplayed Background Track
+                  drawRoundRect(
+                      color = Color.White.copy(alpha = 0.22f),
+                      topLeft = Offset(0f, centerY - trackHeight / 2f),
+                      size = Size(canvasW, trackHeight),
+                      cornerRadius = CornerRadius(trackHeight / 2f)
+                  )
+
+                  // 2. Buffered Track
+                  val bufWidth = (bufferedPercentage.coerceIn(0, 100) / 100f) * canvasW
+                  drawRoundRect(
+                      color = Color.White.copy(alpha = 0.38f),
+                      topLeft = Offset(0f, centerY - trackHeight / 2f),
+                      size = Size(bufWidth, trackHeight),
+                      cornerRadius = CornerRadius(trackHeight / 2f)
+                  )
+
+                  // 3. Active Played Track
+                  val playedFraction = (currentPositionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+                  val playedWidth = playedFraction * canvasW
+                  drawRoundRect(
+                      color = palette.primaryAccent,
+                      topLeft = Offset(0f, centerY - trackHeight / 2f),
+                      size = Size(playedWidth, trackHeight),
+                      cornerRadius = CornerRadius(trackHeight / 2f)
+                  )
+
+                  // 4. Precision A-B Loop Span & Bracket Handles ([ ... ])
+                  if (loopStartMs != null) {
+                      val aX = ((loopStartMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)) * canvasW
+                      val bX = if (loopEndMs != null) {
+                          ((loopEndMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)) * canvasW
+                      } else aX
+
+                      if (loopEndMs != null && bX > aX) {
+                          drawRect(
+                              color = palette.tertiaryLoopAccent.copy(alpha = 0.38f),
+                              topLeft = Offset(aX, centerY - 11.dp.toPx()),
+                              size = Size(bX - aX, 22.dp.toPx())
+                          )
+                      }
+
+                      // Left '[' Bracket for Point A
+                      val bracketH = 24.dp.toPx()
+                      val bracketArm = 6.dp.toPx()
+                      drawLine(
+                          color = palette.tertiaryLoopAccent,
+                          start = Offset(aX, centerY - bracketH / 2f),
+                          end = Offset(aX, centerY + bracketH / 2f),
+                          strokeWidth = 3.dp.toPx(),
+                          cap = StrokeCap.Round
+                      )
+                      drawLine(
+                          color = palette.tertiaryLoopAccent,
+                          start = Offset(aX, centerY - bracketH / 2f),
+                          end = Offset(aX + bracketArm, centerY - bracketH / 2f),
+                          strokeWidth = 3.dp.toPx()
+                      )
+                      drawLine(
+                          color = palette.tertiaryLoopAccent,
+                          start = Offset(aX, centerY + bracketH / 2f),
+                          end = Offset(aX + bracketArm, centerY + bracketH / 2f),
+                          strokeWidth = 3.dp.toPx()
+                      )
+
+                      // Right ']' Bracket for Point B
+                      if (loopEndMs != null) {
+                          drawLine(
+                              color = palette.tertiaryLoopAccent,
+                              start = Offset(bX, centerY - bracketH / 2f),
+                              end = Offset(bX, centerY + bracketH / 2f),
+                              strokeWidth = 3.dp.toPx(),
+                              cap = StrokeCap.Round
+                          )
+                          drawLine(
+                              color = palette.tertiaryLoopAccent,
+                              start = Offset(bX - bracketArm, centerY - bracketH / 2f),
+                              end = Offset(bX, centerY - bracketH / 2f),
+                              strokeWidth = 3.dp.toPx()
+                          )
+                          drawLine(
+                              color = palette.tertiaryLoopAccent,
+                              start = Offset(bX - bracketArm, centerY + bracketH / 2f),
+                              end = Offset(bX, centerY + bracketH / 2f),
+                              strokeWidth = 3.dp.toPx()
+                          )
+                      }
+                  }
+
+                  // 5. Diamond Bookmark Pin Markers
+                  val diamondRadius = 5.dp.toPx()
+                  for (bm in bookmarks) {
+                      val bmX = ((bm.timestampMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)) * canvasW
+                      val bmY = centerY - 12.dp.toPx()
+                      val diamondPath = Path().apply {
+                          moveTo(bmX, bmY - diamondRadius)
+                          lineTo(bmX + diamondRadius, bmY)
+                          lineTo(bmX, bmY + diamondRadius)
+                          lineTo(bmX - diamondRadius, bmY)
+                          close()
+                      }
+                      drawPath(path = diamondPath, color = palette.tertiaryLoopAccent)
+                  }
+
+                  // 6. Glowing Playhead Thumb
+                  drawCircle(
+                      color = palette.primaryGlow,
+                      radius = 12.dp.toPx(),
+                      center = Offset(playedWidth, centerY)
+                  )
+                  drawCircle(
+                      color = palette.primaryAccent,
+                      radius = 7.dp.toPx(),
+                      center = Offset(playedWidth, centerY)
+                  )
+                  drawCircle(
+                      color = Color.White,
+                      radius = 3.dp.toPx(),
+                      center = Offset(playedWidth, centerY)
+                  )
+              }
+          }
+
+          @Composable
+          private fun OsdActionPill(
+              icon: ImageVector,
+              label: String,
+              isHighlighted: Boolean = false,
+              highlightColor: Color? = null,
+              palette: VideoDynamicPalette,
+              onClick: () -> Unit
+          ) {
+              val activeAccent = highlightColor ?: palette.primaryAccent
+              Surface(
+                  shape = CircleShape,
+                  color = if (isHighlighted) activeAccent.copy(alpha = 0.24f) else palette.osdSurface,
+                  border = BorderStroke(
+                      width = 1.dp,
+                      color = if (isHighlighted) activeAccent else palette.specularBorder
+                  ),
+                  onClick = onClick,
+                  modifier = Modifier.height(36.dp)
+              ) {
+                  Row(
+                      modifier = Modifier.padding(horizontal = 12.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      Icon(
+                          imageVector = icon,
+                          contentDescription = label,
+                          tint = if (isHighlighted) activeAccent else Color.White,
+                          modifier = Modifier.size(16.dp)
+                      )
+                      Text(
+                          text = label,
+                          style = TabularNumeralStyle,
+                          fontSize = 12.sp,
+                          fontWeight = if (isHighlighted) FontWeight.Bold else FontWeight.Medium,
+                          color = if (isHighlighted) activeAccent else Color.White
+                      )
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 3. LAYER 6: VIEWPORT-SHRINKING RIGHT SIDE-SHEET (SUBTITLES, AUDIO, PINS, SPEED)
+          // ============================================================================
+
+          @Composable
+          fun ViewportShrinkingSideSheet(
+              activeTab: SideSheetTab,
+              onSelectTab: (SideSheetTab) -> Unit,
+              onClose: () -> Unit,
+              palette: VideoDynamicPalette,
+              prefs: AppPreferencesState,
+              subtitleTracks: List<PlayerTrackOption>,
+              subtitlesEnabled: Boolean,
+              externalSubtitleLabel: String?,
+              subtitleDelayMs: Long,
+              subtitleSpeedFactor: Float,
+              subtitleAnchorTimeMs: Long,
+              audioTracks: List<PlayerTrackOption>,
+              audioDelayMs: Long,
+              volumeFraction: Float,
+              bookmarks: List<BookmarkEntity>,
+              savedLoops: List<SavedLoopEntity>,
+              playbackSpeed: Float,
+              onSelectSubtitleTrack: (PlayerTrackOption?) -> Unit,
+              onPickExternalSubtitle: () -> Unit,
+              onAdjustSubtitleDelay: (Long) -> Unit,
+              onResetSubtitleDelay: () -> Unit,
+              onSetSubtitleSpeed: (Float) -> Unit,
+              onAnchorSubtitleSpeedHere: () -> Unit,
+              onUpdateSubtitleStyle: (SubtitleFontChoice?, Float?, Int?, Float?, Float?, Boolean?, Float?) -> Unit,
+              onSelectAudioTrack: (PlayerTrackOption) -> Unit,
+              onPickExternalAudio: () -> Unit,
+              onAdjustAudioDelay: (Long) -> Unit,
+              onResetAudioDelay: () -> Unit,
+              onSetVolumeBoost: (Float) -> Unit,
+              onSeekToExact: (Long) -> Unit,
+              onAddBookmarkNow: (String) -> Unit,
+              onUpdateBookmarkLabel: (BookmarkEntity, String) -> Unit,
+              onDeleteBookmark: (BookmarkEntity) -> Unit,
+              onActivateSavedLoop: (SavedLoopEntity) -> Unit,
+              onDeleteSavedLoop: (SavedLoopEntity) -> Unit,
+              onSetPlaybackSpeed: (Float) -> Unit
+          ) {
+              Surface(
+                  color = Color(0xFF101216).copy(alpha = 0.96f),
+                  border = BorderStroke(1.dp, palette.specularBorder),
+                  modifier = Modifier
+                      .fillMaxHeight()
+                      .width(340.dp)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .padding(14.dp)
+                  ) {
+                      // Top Header & Tab Switcher
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.SpaceBetween
+                      ) {
+                          Text(
+                              text = activeTab.title,
+                              style = MaterialTheme.typography.titleMedium,
+                              fontWeight = FontWeight.Bold,
+                              color = Color.White
+                          )
+                          IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
+                              Icon(Icons.Default.Close, contentDescription = "Close Panel", tint = Color.White)
+                          }
+                      }
+
+                      Spacer(Modifier.height(8.dp))
+
+                      // 4-Icon Quick Tab Bar
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          SideSheetTab.entries.forEach { tab ->
+                              val selected = tab == activeTab
+                              val icon = when (tab) {
+                                  SideSheetTab.SUBTITLES -> Icons.Outlined.Subtitles
+                                  SideSheetTab.AUDIO -> Icons.Outlined.Audiotrack
+                                  SideSheetTab.BOOKMARKS_LOOPS -> Icons.Outlined.Bookmarks
+                                  SideSheetTab.SPEED -> Icons.Default.Speed
+                              }
+                              Surface(
+                                  shape = RoundedCornerShape(10.dp),
+                                  color = if (selected) palette.primaryAccent else Color.White.copy(alpha = 0.08f),
+                                  onClick = { onSelectTab(tab) },
+                                  modifier = Modifier
+                                      .weight(1f)
+                                      .height(36.dp)
+                              ) {
+                                  Box(contentAlignment = Alignment.Center) {
+                                      Icon(
+                                          icon,
+                                          contentDescription = tab.title,
+                                          tint = if (selected) palette.onPrimaryAccent else Color.White,
+                                          modifier = Modifier.size(18.dp)
+                                      )
+                                  }
+                              }
+                          }
+                      }
+
+                      HorizontalDivider(
+                          modifier = Modifier.padding(vertical = 10.dp),
+                          color = palette.specularBorder
+                      )
+
+                      // Tab Body Content
+                      Box(modifier = Modifier.weight(1f)) {
+                          when (activeTab) {
+                              SideSheetTab.SUBTITLES -> SubtitleSideSheetContent(
+                                  palette = palette,
+                                  prefs = prefs,
+                                  subtitleTracks = subtitleTracks,
+                                  subtitlesEnabled = subtitlesEnabled,
+                                  externalSubtitleLabel = externalSubtitleLabel,
+                                  subtitleDelayMs = subtitleDelayMs,
+                                  subtitleSpeedFactor = subtitleSpeedFactor,
+                                  subtitleAnchorTimeMs = subtitleAnchorTimeMs,
+                                  onSelectSubtitleTrack = onSelectSubtitleTrack,
+                                  onPickExternalSubtitle = onPickExternalSubtitle,
+                                  onAdjustSubtitleDelay = onAdjustSubtitleDelay,
+                                  onResetSubtitleDelay = onResetSubtitleDelay,
+                                  onSetSubtitleSpeed = onSetSubtitleSpeed,
+                                  onAnchorSubtitleSpeedHere = onAnchorSubtitleSpeedHere,
+                                  onUpdateSubtitleStyle = onUpdateSubtitleStyle
+                              )
+                              SideSheetTab.AUDIO -> AudioSideSheetContent(
+                                  palette = palette,
+                                  audioTracks = audioTracks,
+                                  audioDelayMs = audioDelayMs,
+                                  volumeFraction = volumeFraction,
+                                  onSelectAudioTrack = onSelectAudioTrack,
+                                  onPickExternalAudio = onPickExternalAudio,
+                                  onAdjustAudioDelay = onAdjustAudioDelay,
+                                  onResetAudioDelay = onResetAudioDelay,
+                                  onSetVolumeBoost = onSetVolumeBoost
+                              )
+                              SideSheetTab.BOOKMARKS_LOOPS -> BookmarksAndLoopsSideSheetContent(
+                                  palette = palette,
+                                  bookmarks = bookmarks,
+                                  savedLoops = savedLoops,
+                                  onSeekToExact = onSeekToExact,
+                                  onAddBookmarkNow = onAddBookmarkNow,
+                                  onUpdateBookmarkLabel = onUpdateBookmarkLabel,
+                                  onDeleteBookmark = onDeleteBookmark,
+                                  onActivateSavedLoop = onActivateSavedLoop,
+                                  onDeleteSavedLoop = onDeleteSavedLoop
+                              )
+                              SideSheetTab.SPEED -> SpeedSideSheetContent(
+                                  palette = palette,
+                                  playbackSpeed = playbackSpeed,
+                                  onSetPlaybackSpeed = onSetPlaybackSpeed
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 4. SIDE-SHEET TAB 1: SUBTITLES (TRACKS, OFFSET + FPS SPEED SCALER, STYLE)
+          // ============================================================================
+
+          @Composable
+          private fun SubtitleSideSheetContent(
+              palette: VideoDynamicPalette,
+              prefs: AppPreferencesState,
+              subtitleTracks: List<PlayerTrackOption>,
+              subtitlesEnabled: Boolean,
+              externalSubtitleLabel: String?,
+              subtitleDelayMs: Long,
+              subtitleSpeedFactor: Float,
+              subtitleAnchorTimeMs: Long,
+              onSelectSubtitleTrack: (PlayerTrackOption?) -> Unit,
+              onPickExternalSubtitle: () -> Unit,
+              onAdjustSubtitleDelay: (Long) -> Unit,
+              onResetSubtitleDelay: () -> Unit,
+              onSetSubtitleSpeed: (Float) -> Unit,
+              onAnchorSubtitleSpeedHere: () -> Unit,
+              onUpdateSubtitleStyle: (SubtitleFontChoice?, Float?, Int?, Float?, Float?, Boolean?, Float?) -> Unit
+          ) {
+              var subSection by remember { mutableIntStateOf(0) } // 0=Tracks, 1=Sync & Speed, 2=Style
+
+              Column(modifier = Modifier.fillMaxSize()) {
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      listOf("Tracks", "Sync & FPS", "Typography").forEachIndexed { idx, label ->
+                          FilterChip(
+                              selected = subSection == idx,
+                              onClick = { subSection = idx },
+                              label = { Text(label, fontSize = 11.sp) },
+                              modifier = Modifier.weight(1f)
+                          )
+                      }
+                  }
+
+                  Spacer(Modifier.height(8.dp))
+
+                  Column(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .verticalScroll(rememberScrollState()),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      when (subSection) {
+                          0 -> {
+                              OutlinedButton(
+                                  onClick = onPickExternalSubtitle,
+                                  modifier = Modifier.fillMaxWidth()
+                              ) {
+                                  Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                  Spacer(Modifier.width(6.dp))
+                                  Text("+ Load Subtitle File (.srt/.ass/.vtt/.sub)")
+                              }
+
+                              if (externalSubtitleLabel != null) {
+                                  Surface(
+                                      shape = RoundedCornerShape(10.dp),
+                                      color = palette.primaryAccent.copy(alpha = 0.2f),
+                                      border = BorderStroke(1.dp, palette.primaryAccent),
+                                      modifier = Modifier.fillMaxWidth()
+                                  ) {
+                                      Row(
+                                          modifier = Modifier.padding(10.dp),
+                                          verticalAlignment = Alignment.CenterVertically
+                                      ) {
+                                          Icon(Icons.Default.CheckCircle, contentDescription = null, tint = palette.primaryAccent)
+                                          Spacer(Modifier.width(8.dp))
+                                          Column {
+                                              Text("External Subtitle Active", style = MaterialTheme.typography.labelSmall, color = palette.primaryAccent)
+                                              Text(externalSubtitleLabel, style = MaterialTheme.typography.bodySmall, color = Color.White)
+                                          }
+                                      }
+                                  }
+                              }
+
+                              // Off option
+                              TrackRowItem(
+                                  title = "Disable Subtitles (Off)",
+                                  badge = "OFF",
+                                  selected = !subtitlesEnabled,
+                                  palette = palette,
+                                  onClick = { onSelectSubtitleTrack(null) }
+                              )
+
+                              subtitleTracks.forEach { track ->
+                                  TrackRowItem(
+                                      title = "${track.label} (${track.language})",
+                                      badge = track.codecBadge,
+                                      selected = subtitlesEnabled && externalSubtitleLabel == null && track.isSelected,
+                                      palette = palette,
+                                      onClick = { onSelectSubtitleTrack(track) }
+                                  )
+                              }
+                          }
+
+                          1 -> {
+                              // Dual-Parameter Subtitle Synchronization: Delay Offset + FPS Speed Scaler
+                              Text(
+                                  text = "Delay Offset: ${FormatUtils.formatSignedSeconds(subtitleDelayMs)}",
+                                  style = TabularMonoStyle,
+                                  fontWeight = FontWeight.Bold,
+                                  color = palette.primaryAccent
+                              )
+                              Row(
+                                  modifier = Modifier.fillMaxWidth(),
+                                  horizontalArrangement = Arrangement.spacedBy(6.dp)
+                              ) {
+                                  MicroTunerChip(text = "-0.5s", onClick = { onAdjustSubtitleDelay(-500L) })
+                                  MicroTunerChip(text = "-0.05s", onClick = { onAdjustSubtitleDelay(-50L) })
+                                  MicroTunerChip(text = "+0.05s", onClick = { onAdjustSubtitleDelay(50L) })
+                                  MicroTunerChip(text = "+0.5s", onClick = { onAdjustSubtitleDelay(500L) })
+                                  MicroTunerChip(text = "Reset", highlightColor = palette.tertiaryLoopAccent, onClick = onResetSubtitleDelay)
+                              }
+
+                              HorizontalDivider(color = palette.specularBorder, modifier = Modifier.padding(vertical = 4.dp))
+
+                              Text(
+                                  text = String.format(Locale.US, "Subtitle Speed (FPS Scaler): %.4fx", subtitleSpeedFactor),
+                                  style = TabularMonoStyle,
+                                  fontWeight = FontWeight.Bold,
+                                  color = palette.primaryAccent
+                              )
+                              Text(
+                                  text = "Fixes progressive subtitle drift when subtitle frame rate differs from video frame rate.",
+                                  style = MaterialTheme.typography.bodySmall,
+                                  color = Color.White.copy(alpha = 0.7f)
+                              )
+
+                              Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  MicroTunerChip(
+                                      text = "-0.1%",
+                                      onClick = { onSetSubtitleSpeed(subtitleSpeedFactor - 0.001f) }
+                                  )
+                                  MicroTunerChip(
+                                      text = "+0.1%",
+                                      onClick = { onSetSubtitleSpeed(subtitleSpeedFactor + 0.001f) }
+                                  )
+                                  MicroTunerChip(
+                                      text = "Set Anchor Here (${FormatUtils.formatDurationMs(subtitleAnchorTimeMs)})",
+                                      highlightColor = palette.tertiaryLoopAccent,
+                                      onClick = onAnchorSubtitleSpeedHere
+                                  )
+                              }
+
+                              Text("Cinema Frame-Rate Drift Presets:", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                              val fpsPresets = listOf(
+                                  "23.976 \u2192 25 fps (0.9590x)" to 0.9590f,
+                                  "25 \u2192 23.976 fps (1.0427x)" to 1.0427f,
+                                  "24 \u2192 23.976 fps (1.0010x)" to 1.0010f,
+                                  "1.0000x (Normal 1:1)" to 1.0000f
+                              )
+                              fpsPresets.forEach { (label, factor) ->
+                                  TrackRowItem(
+                                      title = label,
+                                      badge = String.format(Locale.US, "%.4fx", factor),
+                                      selected = abs(subtitleSpeedFactor - factor) < 0.0004f,
+                                      palette = palette,
+                                      onClick = { onSetSubtitleSpeed(factor) }
+                                  )
+                              }
+                          }
+
+                          2 -> {
+                              // Typography & Styling Controls
+                              Text("Bundled Subtitle Font Family", style = MaterialTheme.typography.labelMedium, color = palette.primaryAccent)
+                              SubtitleFontChoice.entries.forEach { fontChoice ->
+                                  TrackRowItem(
+                                      title = fontChoice.label,
+                                      badge = "TTF",
+                                      selected = prefs.subtitleFont == fontChoice,
+                                      palette = palette,
+                                      onClick = { onUpdateSubtitleStyle(fontChoice, null, null, null, null, null, null) }
+                                  )
+                              }
+
+                              Text(
+                                  "Font Size: ${prefs.subtitleFontSizeSp.roundToInt()} sp",
+                                  style = TabularNumeralStyle,
+                                  color = Color.White
+                              )
+                              Slider(
+                                  value = prefs.subtitleFontSizeSp,
+                                  onValueChange = { onUpdateSubtitleStyle(null, it, null, null, null, null, null) },
+                                  valueRange = 14f..42f
+                              )
+
+                              Text("Subtitle Text Color", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                              Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                  val colors = listOf(
+                                      0xFFFFFFFF.toInt(),
+                                      0xFFFFEA00.toInt(),
+                                      0xFF00E5FF.toInt(),
+                                      0xFF69F0AE.toInt(),
+                                      0xFFFF80AB.toInt()
+                                  )
+                                  colors.forEach { argb ->
+                                      Box(
+                                          modifier = Modifier
+                                              .size(30.dp)
+                                              .clip(CircleShape)
+                                              .background(Color(argb))
+                                              .border(
+                                                  width = if (prefs.subtitleTextColorArgb == argb) 3.dp else 1.dp,
+                                                  color = if (prefs.subtitleTextColorArgb == argb) palette.primaryAccent else Color.White,
+                                                  shape = CircleShape
+                                              )
+                                              .clickable { onUpdateSubtitleStyle(null, null, argb, null, null, null, null) }
+                                      )
+                                  }
+                              }
+
+                              Text(
+                                  "Outline Stroke Width: ${String.format(Locale.US, "%.1f dp", prefs.subtitleOutlineWidthDp)}",
+                                  style = TabularNumeralStyle,
+                                  color = Color.White
+                              )
+                              Slider(
+                                  value = prefs.subtitleOutlineWidthDp,
+                                  onValueChange = { onUpdateSubtitleStyle(null, null, null, it, null, null, null) },
+                                  valueRange = 0f..5f
+                              )
+
+                              Text(
+                                  "Background Box Opacity: ${(prefs.subtitleBgOpacity * 100).roundToInt()}%",
+                                  style = TabularNumeralStyle,
+                                  color = Color.White
+                              )
+                              Slider(
+                                  value = prefs.subtitleBgOpacity,
+                                  onValueChange = { onUpdateSubtitleStyle(null, null, null, null, it, null, null) },
+                                  valueRange = 0f..1f
+                              )
+
+                              Text(
+                                  "Bottom Margin Offset: ${prefs.subtitleBottomMarginDp.roundToInt()} dp",
+                                  style = TabularNumeralStyle,
+                                  color = Color.White
+                              )
+                              Slider(
+                                  value = prefs.subtitleBottomMarginDp,
+                                  onValueChange = { onUpdateSubtitleStyle(null, null, null, null, null, null, it) },
+                                  valueRange = 8f..100f
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 5. SIDE-SHEET TAB 2: AUDIO TRACKS & BIDIRECTIONAL PCM DELAY (-5s to +5s)
+          // ============================================================================
+
+          @Composable
+          private fun AudioSideSheetContent(
+              palette: VideoDynamicPalette,
+              audioTracks: List<PlayerTrackOption>,
+              audioDelayMs: Long,
+              volumeFraction: Float,
+              onSelectAudioTrack: (PlayerTrackOption) -> Unit,
+              onPickExternalAudio: () -> Unit,
+              onAdjustAudioDelay: (Long) -> Unit,
+              onResetAudioDelay: () -> Unit,
+              onSetVolumeBoost: (Float) -> Unit
+          ) {
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
+              ) {
+                  Text(
+                      text = "Bidirectional Audio Sync: ${FormatUtils.formatSignedSeconds(audioDelayMs)}",
+                      style = TabularMonoStyle,
+                      fontWeight = FontWeight.Bold,
+                      color = palette.primaryAccent
+                  )
+                  Text(
+                      text = "Backed by circular PCM ring-buffer DelayingAudioProcessor (-5000ms to +5000ms).",
+                      style = MaterialTheme.typography.bodySmall,
+                      color = Color.White.copy(alpha = 0.7f)
+                  )
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(6.dp)
+                  ) {
+                      MicroTunerChip(text = "-0.25s", onClick = { onAdjustAudioDelay(-250L) })
+                      MicroTunerChip(text = "-0.05s", onClick = { onAdjustAudioDelay(-50L) })
+                      MicroTunerChip(text = "+0.05s", onClick = { onAdjustAudioDelay(50L) })
+                      MicroTunerChip(text = "+0.25s", onClick = { onAdjustAudioDelay(250L) })
+                      MicroTunerChip(text = "Reset", highlightColor = palette.tertiaryLoopAccent, onClick = onResetAudioDelay)
+                  }
+
+                  HorizontalDivider(color = palette.specularBorder)
+
+                  val pct = (volumeFraction * 100f).roundToInt()
+                  Text(
+                      text = "Volume & LoudnessEnhancer Boost: $pct%",
+                      style = TabularNumeralStyle,
+                      fontWeight = FontWeight.Bold,
+                      color = if (pct > 100) palette.tertiaryLoopAccent else Color.White
+                  )
+                  Slider(
+                      value = volumeFraction,
+                      onValueChange = onSetVolumeBoost,
+                      valueRange = 0f..2.0f
+                  )
+
+                  HorizontalDivider(color = palette.specularBorder)
+
+                  OutlinedButton(
+                      onClick = onPickExternalAudio,
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Icon(Icons.Default.AudioFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                      Spacer(Modifier.width(6.dp))
+                      Text("+ Load External Audio Track")
+                  }
+
+                  Text("Embedded Audio Streams", style = MaterialTheme.typography.labelMedium, color = palette.primaryAccent)
+                  audioTracks.forEach { track ->
+                      TrackRowItem(
+                          title = "${track.label} (${track.language})",
+                          badge = "${track.codecBadge} • ${track.detailsBadge}",
+                          selected = track.isSelected,
+                          palette = palette,
+                          onClick = { onSelectAudioTrack(track) }
+                      )
+                  }
+              }
+          }
+
+          // ============================================================================
+          // 6. SIDE-SHEET TAB 3: BOOKMARKS & SAVED A-B LOOPS
+          // ============================================================================
+
+          @Composable
+          private fun BookmarksAndLoopsSideSheetContent(
+              palette: VideoDynamicPalette,
+              bookmarks: List<BookmarkEntity>,
+              savedLoops: List<SavedLoopEntity>,
+              onSeekToExact: (Long) -> Unit,
+              onAddBookmarkNow: (String) -> Unit,
+              onUpdateBookmarkLabel: (BookmarkEntity, String) -> Unit,
+              onDeleteBookmark: (BookmarkEntity) -> Unit,
+              onActivateSavedLoop: (SavedLoopEntity) -> Unit,
+              onDeleteSavedLoop: (SavedLoopEntity) -> Unit
+          ) {
+              var editingBookmark by remember { mutableStateOf<BookmarkEntity?>(null) }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
+              ) {
+                  Button(
+                      onClick = { onAddBookmarkNow("") },
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Icon(Icons.Default.BookmarkAdd, contentDescription = null)
+                      Spacer(Modifier.width(6.dp))
+                      Text("Pin Bookmark at Current Frame")
+                  }
+
+                  Text(
+                      "Pinned Video Bookmarks (${bookmarks.size})",
+                      style = MaterialTheme.typography.labelMedium,
+                      color = palette.primaryAccent
+                  )
+                  if (bookmarks.isEmpty()) {
+                      Text(
+                          "No bookmarks pinned yet. Tap [Bookmark +] on the OSD to drop a diamond marker.",
+                          style = MaterialTheme.typography.bodySmall,
+                          color = Color.White.copy(alpha = 0.65f)
+                      )
+                  } else {
+                      bookmarks.forEach { bm ->
+                          Surface(
+                              shape = RoundedCornerShape(10.dp),
+                              color = Color.White.copy(alpha = 0.07f),
+                              border = BorderStroke(1.dp, palette.specularBorder),
+                              onClick = { onSeekToExact(bm.timestampMs) },
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              Row(
+                                  modifier = Modifier.padding(10.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Column(modifier = Modifier.weight(1f)) {
+                                      Text(bm.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                                      Text(
+                                          FormatUtils.formatPreciseCentiseconds(bm.timestampMs),
+                                          style = TabularMonoStyle,
+                                          fontSize = 11.sp,
+                                          color = palette.tertiaryLoopAccent
+                                      )
+                                  }
+                                  IconButton(onClick = { editingBookmark = bm }, modifier = Modifier.size(28.dp)) {
+                                      Icon(Icons.Default.Edit, contentDescription = "Rename", tint = Color.White, modifier = Modifier.size(16.dp))
+                                  }
+                                  IconButton(onClick = { onDeleteBookmark(bm) }, modifier = Modifier.size(28.dp)) {
+                                      Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = Color(0xFFFF6B6B), modifier = Modifier.size(16.dp))
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  HorizontalDivider(color = palette.specularBorder)
+
+                  Text(
+                      "Saved A-B Loops (${savedLoops.size})",
+                      style = MaterialTheme.typography.labelMedium,
+                      color = palette.tertiaryLoopAccent
+                  )
+                  if (savedLoops.isEmpty()) {
+                      Text(
+                          "Set an A-B loop on the timeline and tap [Save Loop] to store reusable study/scene loops.",
+                          style = MaterialTheme.typography.bodySmall,
+                          color = Color.White.copy(alpha = 0.65f)
+                      )
+                  } else {
+                      savedLoops.forEach { loop ->
+                          Surface(
+                              shape = RoundedCornerShape(10.dp),
+                              color = palette.tertiaryLoopAccent.copy(alpha = 0.14f),
+                              border = BorderStroke(1.dp, palette.tertiaryLoopAccent.copy(alpha = 0.5f)),
+                              onClick = { onActivateSavedLoop(loop) },
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              Row(
+                                  modifier = Modifier.padding(10.dp),
+                                  verticalAlignment = Alignment.CenterVertically
+                              ) {
+                                  Column(modifier = Modifier.weight(1f)) {
+                                      Text(loop.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = Color.White)
+                                      Text(
+                                          "${FormatUtils.formatPreciseCentiseconds(loop.startMs)} \u2192 ${FormatUtils.formatPreciseCentiseconds(loop.endMs)}",
+                                          style = TabularMonoStyle,
+                                          fontSize = 11.sp,
+                                          color = palette.tertiaryLoopAccent
+                                      )
+                                  }
+                                  IconButton(onClick = { onDeleteSavedLoop(loop) }, modifier = Modifier.size(28.dp)) {
+                                      Icon(Icons.Default.DeleteOutline, contentDescription = "Delete Loop", tint = Color(0xFFFF6B6B), modifier = Modifier.size(16.dp))
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+
+              editingBookmark?.let { target ->
+                  var labelText by remember(target) { mutableStateOf(target.label) }
+                  AlertDialog(
+                      onDismissRequest = { editingBookmark = null },
+                      title = { Text("Edit Bookmark Label") },
+                      text = {
+                          OutlinedTextField(
+                              value = labelText,
+                              onValueChange = { labelText = it },
+                              singleLine = true,
+                              modifier = Modifier.fillMaxWidth()
+                          )
+                      },
+                      confirmButton = {
+                          Button(onClick = {
+                              onUpdateBookmarkLabel(target, labelText)
+                              editingBookmark = null
+                          }) { Text("Save") }
+                      },
+                      dismissButton = {
+                          TextButton(onClick = { editingBookmark = null }) { Text("Cancel") }
+                      }
+                  )
+              }
+          }
+
+          // ============================================================================
+          // 7. SIDE-SHEET TAB 4: PRECISION PLAYBACK SPEED CONTROLLER
+          // ============================================================================
+
+          @Composable
+          private fun SpeedSideSheetContent(
+              palette: VideoDynamicPalette,
+              playbackSpeed: Float,
+              onSetPlaybackSpeed: (Float) -> Unit
+          ) {
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(12.dp)
+              ) {
+                  Text(
+                      text = String.format(Locale.US, "Active Speed: %.2fx", playbackSpeed),
+                      style = TabularMonoStyle,
+                      fontSize = 16.sp,
+                      fontWeight = FontWeight.Bold,
+                      color = palette.primaryAccent
+                  )
+
+                  Slider(
+                      value = playbackSpeed,
+                      onValueChange = { onSetPlaybackSpeed((it * 20f).roundToInt() / 20f) },
+                      valueRange = 0.25f..4.0f
+                  )
+
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      MicroTunerChip(text = "-0.05x", onClick = { onSetPlaybackSpeed(playbackSpeed - 0.05f) })
+                      MicroTunerChip(text = "+0.05x", onClick = { onSetPlaybackSpeed(playbackSpeed + 0.05f) })
+                      MicroTunerChip(text = "Reset 1.00x", highlightColor = palette.tertiaryLoopAccent, onClick = { onSetPlaybackSpeed(1.0f) })
+                  }
+
+                  Text("Quick Cinema & Lecture Speed Presets", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                  val speeds = listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f)
+                  speeds.forEach { spd ->
+                      TrackRowItem(
+                          title = String.format(Locale.US, "%.2fx Playback", spd),
+                          badge = if (spd == 1.0f) "NORMAL" else "${spd}x",
+                          selected = abs(playbackSpeed - spd) < 0.02f,
+                          palette = palette,
+                          onClick = { onSetPlaybackSpeed(spd) }
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun TrackRowItem(
+              title: String,
+              badge: String,
+              selected: Boolean,
+              palette: VideoDynamicPalette,
+              onClick: () -> Unit
+          ) {
+              Surface(
+                  shape = RoundedCornerShape(10.dp),
+                  color = if (selected) palette.primaryAccent.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.06f),
+                  border = BorderStroke(
+                      1.dp,
+                      if (selected) palette.primaryAccent else palette.specularBorder
+                  ),
+                  onClick = onClick,
+                  modifier = Modifier.fillMaxWidth()
+              ) {
+                  Row(
+                      modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                  ) {
+                      Text(
+                          text = title,
+                          style = MaterialTheme.typography.bodySmall,
+                          fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                          color = Color.White,
+                          maxLines = 1,
+                          overflow = TextOverflow.Ellipsis,
+                          modifier = Modifier.weight(1f)
+                      )
+                      Spacer(Modifier.width(8.dp))
+                      Text(
+                          text = badge,
+                          style = TabularMonoStyle,
+                          fontSize = 10.sp,
+                          fontWeight = FontWeight.Bold,
+                          color = if (selected) palette.primaryAccent else Color.White.copy(alpha = 0.7f)
+                      )
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/flagship/videoplayer/MainActivity.kt
+          package com.flagship.videoplayer
+
+          import android.app.PictureInPictureParams
+          import android.content.Intent
+          import android.content.res.Configuration
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.Rational
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.runtime.*
+          import androidx.lifecycle.ViewModelProvider
+          import com.flagship.videoplayer.data.*
+          import com.flagship.videoplayer.engine.PlayerViewModel
+          import com.flagship.videoplayer.ui.home.HomeLibraryScreen
+          import com.flagship.videoplayer.ui.home.HomeLibraryViewModel
+          import com.flagship.videoplayer.ui.player.FlagshipPlayerScreen
+          import com.flagship.videoplayer.ui.theme.FlagshipVideoPlayerTheme
+
+          class MainActivity : ComponentActivity() {
+
+              private lateinit var homeViewModel: HomeLibraryViewModel
+              private lateinit var playerViewModel: PlayerViewModel
+              private var isInPipModeState by mutableStateOf(false)
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+
+                  val database = FlagshipDatabase.getInstance(applicationContext)
+                  val prefsRepo = AppPreferencesRepository(applicationContext)
+
+                  homeViewModel = ViewModelProvider(
+                      this,
+                      HomeLibraryViewModel.Factory(applicationContext, database.dao(), prefsRepo)
+                  )[HomeLibraryViewModel::class.java]
+
+                  playerViewModel = ViewModelProvider(
+                      this,
+                      PlayerViewModel.Factory(applicationContext, database.dao(), prefsRepo)
+                  )[PlayerViewModel::class.java]
+
+                  handleIncomingViewIntent(intent)
+
+                  setContent {
+                      val prefs by homeViewModel.preferencesState.collectAsState()
+                      val activeVideo by playerViewModel.activeVideo.collectAsState()
+
+                      FlagshipVideoPlayerTheme(
+                          themeMode = prefs.themeMode,
+                          useDynamicColors = prefs.useDynamicColors
+                      ) {
+                          if (activeVideo != null) {
+                              FlagshipPlayerScreen(
+                                  viewModel = playerViewModel,
+                                  isInPipMode = isInPipModeState,
+                                  onEnterPipMode = { triggerPictureInPicture() },
+                                  onExitPlayer = {
+                                      playerViewModel.stopAndReleasePlayer()
+                                      homeViewModel.refreshLibrary()
+                                  }
+                              )
+                          } else {
+                              HomeLibraryScreen(
+                                  viewModel = homeViewModel,
+                                  onPlayVideo = { videoItem, autoResume ->
+                                      playerViewModel.loadAndPlayVideo(videoItem, autoResume)
+                                  }
+                              )
+                          }
+                      }
+                  }
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  handleIncomingViewIntent(intent)
+              }
+
+              private fun handleIncomingViewIntent(intent: Intent?) {
+                  val dataUri: Uri = intent?.data ?: return
+                  val scheme = dataUri.scheme?.lowercase() ?: ""
+                  val isNetwork = scheme == "http" || scheme == "https" || scheme == "rtsp"
+                  val displayName = dataUri.lastPathSegment?.substringAfterLast('/') ?: "External Media"
+                  val fingerprint = if (isNetwork) {
+                      FileFingerprintEngine.computeStreamFingerprint(dataUri.toString())
+                  } else {
+                      FileFingerprintEngine.computeFingerprint(dataUri.path ?: dataUri.toString(), 0L)
+                  }
+
+                  val externalItem = LocalVideoItem(
+                      mediaStoreId = -1L,
+                      contentUri = dataUri,
+                      filePath = dataUri.toString(),
+                      folderPath = "external://intent",
+                      folderName = "External Videos",
+                      displayName = displayName,
+                      titleWithoutExt = displayName.substringBeforeLast('.'),
+                      extensionBadge = if (isNetwork) NetworkStreamHistoryEntity.detectProtocolBadge(dataUri.toString()) else "VIDEO",
+                      sizeBytes = 0L,
+                      durationMs = 0L,
+                      width = 1920,
+                      height = 1080,
+                      resolutionBadge = "HD",
+                      dateModifiedSec = System.currentTimeMillis() / 1000L,
+                      sidecarSubtitleFiles = emptyList(),
+                      fileFingerprint = fingerprint,
+                      isNetworkStream = isNetwork
+                  )
+                  playerViewModel.loadAndPlayVideo(externalItem, autoResume = true)
+              }
+
+              private fun triggerPictureInPicture() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      runCatching {
+                          val vid = playerViewModel.activeVideo.value
+                          val w = (vid?.width ?: 16).coerceIn(1, 3840)
+                          val h = (vid?.height ?: 9).coerceIn(1, 2160)
+                          val rational = Rational(w, h).let {
+                              if (it.toFloat() in 0.42f..2.38f) it else Rational(16, 9)
+                          }
+                          val params = PictureInPictureParams.Builder()
+                              .setAspectRatio(rational)
+                              .build()
+                          enterPictureInPictureMode(params)
+                      }
+                  }
+              }
+
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  val isPlaying = playerViewModel.isPlaying.value
+                  val autoPip = playerViewModel.preferencesState.value.autoPipEnabled
+                  if (playerViewModel.activeVideo.value != null && isPlaying && autoPip) {
+                      triggerPictureInPicture()
+                  }
+              }
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+                  isInPipModeState = isInPictureInPictureMode
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  val keepBgAudio = playerViewModel.preferencesState.value.backgroundAudioEnabled
+                  if (!isInPipModeState && !keepBgAudio) {
+                      playerViewModel.exoPlayerFlow.value?.pause()
+                  }
+              }
+          }
+          EOF
+
+      - name: Initialize Gradle Wrapper & Compile Flagship Debug APK
+        run: |
+          gradle wrapper --gradle-version 8.9
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload Flagship Video Player APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CinePulse-Pro-Flagship-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
