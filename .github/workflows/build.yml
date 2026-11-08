@@ -44,10 +44,7 @@ jobs:
           sed -i 's/else "-"}${abs(doubleTapAccumulatedSec)}s"/else "-"}${abs(doubleTapSeekAccumulatedSec)}s"/' "$F"
 
       - name: Build debug APK
-        run: |
-          gradle wrapper --gradle-version 8.9 --no-validate-url
-          chmod +x ./gradlew
-          ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
