@@ -46,6 +46,370 @@ jobs:
           sed -i 's/if (doubleTapSide != 0 && doubleTapAccumulatedSec != 0) {/if (doubleTapSide != 0 \&\& doubleTapSeekAccumulatedSec != 0) {/' "$F"
           sed -i 's/else "-"}${abs(doubleTapAccumulatedSec)}s"/else "-"}${abs(doubleTapSeekAccumulatedSec)}s"/' "$F"
 
+      - name: Use fresh database and settings names (avoids stale-data launch crash)
+        run: |
+          F=app/src/main/java/com/flagship/videoplayer/data/DatabaseAndModels.kt
+          sed -i 's/vdx_flagship_player_v7\.db/vdx_flagship_player_v8.db/' "$F"
+          sed -i 's/vdx_player_prefs_v7/vdx_player_prefs_v8/' "$F"
+
+      - name: Rebuild subtitle fonts as clean static fonts
+        run: |
+          python3 -m pip install --break-system-packages fonttools
+          cat << 'EOF' > /tmp/fix_font.py
+          import sys
+          from fontTools.ttLib import TTFont
+          from fontTools.varLib import instancer
+
+          font = TTFont(sys.argv[1])
+          if "fvar" in font:
+              pins = {axis.axisTag: axis.defaultValue for axis in font["fvar"].axes}
+              if "wght" in pins:
+                  pins["wght"] = 500
+              font = instancer.instantiateVariableFont(font, pins)
+          font.save(sys.argv[2])
+          EOF
+          for n in outfit sora satoshi gilroy; do
+            F=app/src/main/res/font/$n.ttf
+            if python3 /tmp/fix_font.py "$F" "/tmp/$n.ttf"; then
+              cp "/tmp/$n.ttf" "$F"
+            else
+              cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$F"
+            fi
+          done
+
+      - name: Make subtitle fonts crash-proof
+        run: |
+          D=app/src/main/java/com/flagship/videoplayer
+          cat << 'EOF' > $D/ui/theme/SafeFonts.kt
+          package com.flagship.videoplayer.ui.theme
+
+          import android.content.Context
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.core.content.res.ResourcesCompat
+          import com.flagship.videoplayer.R
+          import com.flagship.videoplayer.data.SubtitleFontChoice
+
+          object SafeFonts {
+              private fun canLoad(context: Context, resId: Int): Boolean =
+                  runCatching { ResourcesCompat.getFont(context, resId) != null }.getOrDefault(false)
+
+              fun resolve(context: Context, choice: SubtitleFontChoice): FontFamily {
+                  val resId = when (choice) {
+                      SubtitleFontChoice.PLUS_JAKARTA -> R.font.plus_jakarta_sans
+                      SubtitleFontChoice.OPEN_SANS -> R.font.open_sans
+                      SubtitleFontChoice.SATOSHI -> R.font.satoshi
+                      SubtitleFontChoice.GILROY -> R.font.gilroy
+                      SubtitleFontChoice.OUTFIT -> R.font.outfit
+                      SubtitleFontChoice.SORA -> R.font.sora
+                  }
+                  return if (canLoad(context, resId)) resolveSubtitleFontFamily(choice) else FontFamily.SansSerif
+              }
+          }
+          EOF
+          F=$D/ui/player/PlayerScreenAndGestures.kt
+          sed -i 's#val fontFamily = remember(prefs.subtitleFont) { resolveSubtitleFontFamily(prefs.subtitleFont) }#val fontCtx = androidx.compose.ui.platform.LocalContext.current\n    val fontFamily = remember(prefs.subtitleFont) { com.flagship.videoplayer.ui.theme.SafeFonts.resolve(fontCtx, prefs.subtitleFont) }#' "$F"
+          grep -q "SafeFonts.resolve" "$F" || { echo "Font patch did not apply"; exit 1; }
+
+      - name: Add PiP skip buttons (back / play-pause / forward)
+        run: |
+          R=app/src/main/res/drawable
+          D=app/src/main/java/com/flagship/videoplayer
+
+          cat << 'EOF' > $R/ic_pip_rewind.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M11,18V6l-8.5,6 8.5,6zM11.5,12l8.5,6V6z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > $R/ic_pip_forward.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M4,18l8.5,-6L4,6v12zM13,6v12l8.5,-6L13,6z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > $R/ic_pip_play.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M8,5v14l11,-7z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > $R/ic_pip_pause.xml
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M6,19h4V5H6v14zM14,5v14h4V5h-4z"/>
+          </vector>
+          EOF
+
+          cat << 'EOF' > $D/MainActivity.kt
+          package com.flagship.videoplayer
+
+          import android.app.PendingIntent
+          import android.app.PictureInPictureParams
+          import android.app.RemoteAction
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.res.Configuration
+          import android.graphics.drawable.Icon
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.util.Rational
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.compose.runtime.*
+          import androidx.core.content.ContextCompat
+          import androidx.lifecycle.Lifecycle
+          import androidx.lifecycle.ViewModelProvider
+          import androidx.lifecycle.lifecycleScope
+          import com.flagship.videoplayer.data.*
+          import com.flagship.videoplayer.engine.PlayerViewModel
+          import com.flagship.videoplayer.ui.home.HomeLibraryScreen
+          import com.flagship.videoplayer.ui.home.HomeLibraryViewModel
+          import com.flagship.videoplayer.ui.player.FlagshipPlayerScreen
+          import com.flagship.videoplayer.ui.theme.FlagshipVideoPlayerTheme
+          import kotlinx.coroutines.launch
+
+          class MainActivity : ComponentActivity() {
+
+              private lateinit var homeViewModel: HomeLibraryViewModel
+              private lateinit var playerViewModel: PlayerViewModel
+              private var isInPipModeState by mutableStateOf(false)
+              private var pipReceiverRegistered = false
+
+              private companion object {
+                  const val ACTION_PIP_REWIND = "com.flagship.videoplayer.PIP_REWIND"
+                  const val ACTION_PIP_PLAY_PAUSE = "com.flagship.videoplayer.PIP_PLAY_PAUSE"
+                  const val ACTION_PIP_FORWARD = "com.flagship.videoplayer.PIP_FORWARD"
+              }
+
+              private val pipActionReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(context: Context?, intent: Intent?) {
+                      val skipMs = playerViewModel.preferencesState.value.skipIntervalSeconds * 1000L
+                      when (intent?.action) {
+                          ACTION_PIP_REWIND -> playerViewModel.seekRelativeMs(-skipMs)
+                          ACTION_PIP_FORWARD -> playerViewModel.seekRelativeMs(skipMs)
+                          ACTION_PIP_PLAY_PAUSE -> playerViewModel.togglePlayPause()
+                      }
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+
+                  val database = FlagshipDatabase.getInstance(applicationContext)
+                  val prefsRepo = AppPreferencesRepository(applicationContext)
+
+                  homeViewModel = ViewModelProvider(
+                      this,
+                      HomeLibraryViewModel.Factory(applicationContext, database.dao(), prefsRepo)
+                  )[HomeLibraryViewModel::class.java]
+
+                  playerViewModel = ViewModelProvider(
+                      this,
+                      PlayerViewModel.Factory(applicationContext, database.dao(), prefsRepo)
+                  )[PlayerViewModel::class.java]
+
+                  lifecycleScope.launch {
+                      playerViewModel.isPlaying.collect {
+                          if (isInPipModeState) updatePipParams()
+                      }
+                  }
+
+                  handleIncomingViewIntent(intent)
+
+                  setContent {
+                      val prefs by homeViewModel.preferencesState.collectAsState()
+                      val activeVideo by playerViewModel.activeVideo.collectAsState()
+
+                      FlagshipVideoPlayerTheme(
+                          themeMode = prefs.themeMode
+                      ) {
+                          if (activeVideo != null) {
+                              FlagshipPlayerScreen(
+                                  viewModel = playerViewModel,
+                                  isInPipMode = isInPipModeState,
+                                  onEnterPipMode = { triggerPictureInPicture() },
+                                  onExitPlayer = {
+                                      playerViewModel.stopAndReleasePlayer()
+                                      homeViewModel.refreshLibrarySilently()
+                                  }
+                              )
+                          } else {
+                              HomeLibraryScreen(
+                                  viewModel = homeViewModel,
+                                  onPlayVideo = { videoItem, playlist, autoResume ->
+                                      playerViewModel.loadAndPlayVideo(videoItem, playlist, autoResume)
+                                  }
+                              )
+                          }
+                      }
+                  }
+              }
+
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  handleIncomingViewIntent(intent)
+              }
+
+              private fun handleIncomingViewIntent(intent: Intent?) {
+                  val dataUri: Uri = intent?.data ?: return
+                  val scheme = dataUri.scheme?.lowercase() ?: ""
+                  val isNetwork = scheme == "http" || scheme == "https" || scheme == "rtsp"
+                  val displayName = dataUri.lastPathSegment?.substringAfterLast('/') ?: "External media"
+                  val fingerprint = if (isNetwork) {
+                      FileFingerprintEngine.computeStreamFingerprint(dataUri.toString())
+                  } else {
+                      FileFingerprintEngine.computeFingerprint(dataUri.path ?: dataUri.toString(), 0L)
+                  }
+
+                  val externalItem = LocalVideoItem(
+                      mediaStoreId = -1L,
+                      contentUri = dataUri,
+                      filePath = dataUri.toString(),
+                      folderPath = "external://intent",
+                      folderName = "External videos",
+                      displayName = displayName,
+                      titleWithoutExt = displayName.substringBeforeLast('.'),
+                      extensionBadge = if (isNetwork) NetworkStreamHistoryEntity.detectProtocolBadge(dataUri.toString()) else "VIDEO",
+                      sizeBytes = 0L,
+                      durationMs = 0L,
+                      width = 1920,
+                      height = 1080,
+                      resolutionBadge = "HD",
+                      dateModifiedSec = System.currentTimeMillis() / 1000L,
+                      sidecarSubtitlePaths = emptyList(),
+                      fileFingerprint = fingerprint,
+                      isNetworkStream = isNetwork
+                  )
+                  playerViewModel.loadAndPlayVideo(externalItem, listOf(externalItem), autoResume = true)
+              }
+
+              private fun pipAction(iconRes: Int, title: String, action: String, requestCode: Int): RemoteAction {
+                  val pending = PendingIntent.getBroadcast(
+                      this,
+                      requestCode,
+                      Intent(action).setPackage(packageName),
+                      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return RemoteAction(Icon.createWithResource(this, iconRes), title, title, pending)
+              }
+
+              private fun buildPipActions(): List<RemoteAction> {
+                  val skipSec = playerViewModel.preferencesState.value.skipIntervalSeconds
+                  val playing = playerViewModel.isPlaying.value
+                  return listOf(
+                      pipAction(R.drawable.ic_pip_rewind, "Back ${skipSec}s", ACTION_PIP_REWIND, 1),
+                      pipAction(
+                          if (playing) R.drawable.ic_pip_pause else R.drawable.ic_pip_play,
+                          if (playing) "Pause" else "Play",
+                          ACTION_PIP_PLAY_PAUSE,
+                          2
+                      ),
+                      pipAction(R.drawable.ic_pip_forward, "Forward ${skipSec}s", ACTION_PIP_FORWARD, 3)
+                  )
+              }
+
+              private fun buildPipParams(): PictureInPictureParams {
+                  val vid = playerViewModel.activeVideo.value
+                  val w = (vid?.width ?: 16).coerceIn(1, 3840)
+                  val h = (vid?.height ?: 9).coerceIn(1, 2160)
+                  val rational = Rational(w, h).let {
+                      if (it.toFloat() in 0.42f..2.38f) it else Rational(16, 9)
+                  }
+                  val builder = PictureInPictureParams.Builder()
+                      .setAspectRatio(rational)
+                      .setActions(buildPipActions())
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      builder.setSeamlessResizeEnabled(false)
+                  }
+                  return builder.build()
+              }
+
+              private fun updatePipParams() {
+                  runCatching { setPictureInPictureParams(buildPipParams()) }
+              }
+
+              private fun registerPipReceiver() {
+                  if (pipReceiverRegistered) return
+                  val filter = IntentFilter().apply {
+                      addAction(ACTION_PIP_REWIND)
+                      addAction(ACTION_PIP_PLAY_PAUSE)
+                      addAction(ACTION_PIP_FORWARD)
+                  }
+                  ContextCompat.registerReceiver(
+                      this,
+                      pipActionReceiver,
+                      filter,
+                      ContextCompat.RECEIVER_NOT_EXPORTED
+                  )
+                  pipReceiverRegistered = true
+              }
+
+              private fun unregisterPipReceiver() {
+                  if (!pipReceiverRegistered) return
+                  runCatching { unregisterReceiver(pipActionReceiver) }
+                  pipReceiverRegistered = false
+              }
+
+              private fun triggerPictureInPicture() {
+                  runCatching {
+                      registerPipReceiver()
+                      enterPictureInPictureMode(buildPipParams())
+                  }
+              }
+
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  val isPlaying = playerViewModel.isPlaying.value
+                  val autoPip = playerViewModel.preferencesState.value.autoPipEnabled
+                  if (playerViewModel.activeVideo.value != null && isPlaying && autoPip) {
+                      triggerPictureInPicture()
+                  }
+              }
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {
+                  super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+                  isInPipModeState = isInPictureInPictureMode
+                  if (isInPictureInPictureMode) {
+                      registerPipReceiver()
+                      updatePipParams()
+                  } else {
+                      unregisterPipReceiver()
+                  }
+                  if (!isInPictureInPictureMode && !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                      playerViewModel.stopAndReleasePlayer()
+                  }
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  val keepBgAudio = playerViewModel.preferencesState.value.backgroundAudioEnabled
+                  if (!isInPipModeState && !keepBgAudio) {
+                      playerViewModel.exoPlayerFlow.value?.pause()
+                  }
+              }
+
+              override fun onDestroy() {
+                  unregisterPipReceiver()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
