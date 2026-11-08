@@ -1,0 +1,56 @@
+name: Build VDX Player APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vdx-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          mkdir -p "$ANDROID_HOME/licenses"
+          printf "\n24333f8a63b682569dd4e08acf67170a2b42d829\nd56f5187479451eabf01fb78af6dfcb131a6481e\n84831b9409646a578e44e3bb4530a66d34b880fb" > "$ANDROID_HOME/licenses/android-sdk-license"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract and run generator from the big file
+        run: |
+          yq '.jobs.build-vdx-apk.steps[] | select(.name == "Generate Project Structure, Fonts, Gradle Configs & Source Code") | .run' ci/vdx-build-full.yml > generate.sh
+          bash generate.sh
+
+      - name: Patch PiP variable name
+        run: |
+          F=app/src/main/java/com/flagship/videoplayer/ui/player/PlayerScreenAndGestures.kt
+          sed -i 's/if (doubleTapSide != 0 && doubleTapAccumulatedSec != 0) {/if (doubleTapSide != 0 \&\& doubleTapSeekAccumulatedSec != 0) {/' "$F"
+          sed -i 's/else "-"}${abs(doubleTapAccumulatedSec)}s"/else "-"}${abs(doubleTapSeekAccumulatedSec)}s"/' "$F"
+
+      - name: Build debug APK
+        run: |
+          gradle wrapper --gradle-version 8.9
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VDX-Player-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
